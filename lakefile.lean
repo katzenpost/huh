@@ -4,10 +4,16 @@ open Lake DSL System
 package huh where
   leanOptions := #[⟨`pp.unicode.fun, true⟩, ⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
+require LeanBench from git "https://github.com/alok/LeanBench" @ "main"
+
 require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
 
 @[default_target]
 lean_lib Huh
+
+lean_lib Tests
+
+lean_lib Bench
 
 target huh_ffi.o pkg : FilePath := do
   let src ← inputTextFile (pkg.dir / "c" / "huh_ffi.c")
@@ -28,3 +34,6 @@ lean_exe «huh-keygen» where
 
 lean_exe «huh-test» where
   root := `Tests.Main
+
+lean_exe «huh-bench» where
+  root := `Bench.Main
