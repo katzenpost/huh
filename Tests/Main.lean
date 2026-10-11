@@ -1,6 +1,7 @@
 import Huh
 import Tests.Msg
 import Tests.Session
+import Tests.Loopback
 import Uproar.Session
 import Uproar.IO
 
@@ -25,5 +26,5 @@ def main : IO UInt32 := do
     IO.println s!"FAIL invalid protocol name {protocol.name}"; return 1
   handshake
   IO.println s!"{protocol.name}: handshake ok"
-  let failed := (← Tests.Msg.run) + (← Tests.Session.run)
+  let failed := (← Tests.Msg.run) + (← Tests.Session.run) + (← Tests.Loopback.run)
   pure (if failed == 0 then 0 else 1)
