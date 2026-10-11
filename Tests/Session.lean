@@ -20,7 +20,16 @@ def run : IO Nat := do
   let mut failed := 0
   for (why, msgs, ok) in cases do
     if (serverRun msgs).isSome != ok then failed := failed + 1; IO.println s!"  FAIL {why}"
-  IO.println s!"session machine: {cases.length} cases, {failed} failures"
+  let clientRun (msgs : List Msg) : Option Client.Phase :=
+    msgs.foldlM (fun ph m => (Client.step ph m).map (·.1)) .running
+  let clientCases : List (String × List Msg × Bool) :=
+    [("output then exit", [.stdout ⟨#[1]⟩, .stderr ⟨#[2]⟩, .exit (.code 0)], true),
+     ("nothing after exit", [.exit (.code 0), .stdout ⟨#[1]⟩], false),
+     ("client message from server", [.stdin ⟨#[1]⟩], false),
+     ("open from server", [.open_ none none], false)]
+  for (why, msgs, ok) in clientCases do
+    if (clientRun msgs).isSome != ok then failed := failed + 1; IO.println s!"  FAIL client {why}"
+  IO.println s!"session machine: {cases.length + clientCases.length} cases, {failed} failures"
   pure failed
 
 end Tests.Session

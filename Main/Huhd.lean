@@ -26,5 +26,5 @@ def main (args : List String) : IO UInt32 := do
   unless private_ do return ← fail s!"{hostKey} must be private to its owner"
   let kp ← try readPrivate hostKey catch e => return ← fail (toString e)
   let keys := parseAuthorized (← readTextOrEmpty authorized)
-  Server.serve { hostKey := kp, authorized := keys, logStderr := a.logStderr }
+  Server.serve { hostKey := kp, authorized := keys, log := log a.logStderr }
   return 0

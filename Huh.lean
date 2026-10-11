@@ -9,3 +9,4 @@ import Huh.Keys
 import Huh.FFI
 import Huh.Log
 import Huh.Server
+import Huh.Client
