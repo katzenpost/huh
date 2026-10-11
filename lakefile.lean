@@ -4,9 +4,9 @@ open Lake DSL System
 package huh where
   leanOptions := #[⟨`pp.unicode.fun, true⟩, ⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
-require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
-
 require LeanBench from git "https://github.com/alok/LeanBench" @ "main"
+
+require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
 
 @[default_target]
 lean_lib Huh
