@@ -6,3 +6,4 @@ import Huh.Frame
 import Huh.Handshake
 import Huh.Secure
 import Huh.Keys
+import Huh.FFI
