@@ -1,4 +1,6 @@
 import Huh
+import Tests.Msg
+import Tests.Session
 import Uproar.Session
 import Uproar.IO
 
@@ -23,4 +25,5 @@ def main : IO UInt32 := do
     IO.println s!"FAIL invalid protocol name {protocol.name}"; return 1
   handshake
   IO.println s!"{protocol.name}: handshake ok"
-  pure 0
+  let failed := (← Tests.Msg.run) + (← Tests.Session.run)
+  pure (if failed == 0 then 0 else 1)

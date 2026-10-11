@@ -9,6 +9,8 @@ require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
 @[default_target]
 lean_lib Huh
 
+lean_lib Tests
+
 target huh_ffi.o pkg : FilePath := do
   let src ← inputTextFile (pkg.dir / "c" / "huh_ffi.c")
   buildO (pkg.buildDir / "c" / "huh_ffi.o") src
