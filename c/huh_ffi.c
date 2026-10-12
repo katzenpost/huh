@@ -262,7 +262,7 @@ LEAN_EXPORT lean_obj_res huh_tty_raw(uint32_t fd) {
   if (tcgetattr((int)fd, &saved) < 0) return io_errno();
   raw = saved;
   cfmakeraw(&raw);
-  if (tcsetattr((int)fd, TCSAFLUSH, &raw) < 0) return io_errno();
+  if (tcsetattr((int)fd, TCSADRAIN, &raw) < 0) return io_errno();
   lean_object *out = lean_alloc_sarray(1, sizeof(saved), sizeof(saved));
   memcpy(lean_sarray_cptr(out), &saved, sizeof(saved));
   return lean_io_result_mk_ok(out);
@@ -272,7 +272,7 @@ LEAN_EXPORT lean_obj_res huh_tty_restore(uint32_t fd, b_lean_obj_arg saved) {
   struct termios t;
   if (lean_sarray_size(saved) != sizeof(t)) return io_user_error("bad saved terminal state");
   memcpy(&t, lean_sarray_cptr(saved), sizeof(t));
-  if (tcsetattr((int)fd, TCSAFLUSH, &t) < 0) return io_errno();
+  if (tcsetattr((int)fd, TCSADRAIN, &t) < 0) return io_errno();
   return io_unit();
 }
 

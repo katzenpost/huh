@@ -35,5 +35,8 @@ lean_exe «huh-keygen» where
 lean_exe «huh-test» where
   root := `Tests.Main
 
+lean_exe «huh-pty-test» where
+  root := `Tests.PtyE2E
+
 lean_exe «huh-bench» where
   root := `Bench.Main
