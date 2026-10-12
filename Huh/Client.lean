@@ -4,6 +4,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 -/
 
 import Huh.Server
+import Std.Async.Signal
 
 /-! # The client end of a session
 
@@ -19,8 +20,9 @@ structure Terminal where
   readStdin : IO ByteArray
   writeStdout : ByteArray → IO Unit
   writeStderr : ByteArray → IO Unit
-  /-- Polled for size changes when a PTY was requested. -/
   winsize : IO (UInt16 × UInt16)
+  /-- Arms a wait for the next size change and returns an action that blocks until it happens. -/
+  resized : IO (IO Unit)
 
 structure Config where
   key : KeyPair
@@ -52,10 +54,12 @@ partial def pumpStdin (term : Terminal) (out : Outbox) : IO Unit := do
   out.send (.stdin b)
   pumpStdin term out
 
+/-- Arms the next wait before reading the size, so a change in between is not missed. -/
 partial def watchSize (term : Terminal) (out : Outbox) (last : UInt16 × UInt16) : IO Unit := do
-  IO.sleep 250
+  let next ← term.resized
   let now ← try term.winsize catch _ => pure last
   if now != last then out.send (.windowChange now.1 now.2)
+  next
   watchSize term out now
 
 partial def reader (frames : Frames) (term : Terminal) (rcv : Receiver) (phase : Phase) :
@@ -108,9 +112,11 @@ def verifyKnownHost (knownHosts : System.FilePath) (hostId : String) (pub : Byte
     h.putStrLn (hostId ++ " " ++ publicLine pub)
   return yes
 
-def realTerminal : Terminal :=
-  { readStdin := FFI.read 0 maxData.toUSize, writeStdout := FFI.write 1, writeStderr := FFI.write 2,
-    winsize := FFI.ttyWinsize 0 }
+def realTerminal : IO Terminal := do
+  let winch ← Std.Async.Signal.Waiter.mk .sigwinch true
+  return { readStdin := FFI.read 0 maxData.toUSize, writeStdout := FFI.write 1,
+           writeStderr := FFI.write 2, winsize := FFI.ttyWinsize 0,
+           resized := do let t ← winch.wait; return discard (IO.wait t) }
 
 /-- Run a session over `transport`'s stdin and stdout, in raw mode when a PTY is requested. -/
 def run (cfg : Config) (transport : String) : IO UInt32 := do
@@ -123,7 +129,7 @@ def run (cfg : Config) (transport : String) : IO UInt32 := do
   let raw := if cfg.pty.isSome then do saved.set (some (← FFI.ttyRaw 0)) else pure ()
   let restore := do if let some s ← saved.get then FFI.ttyRestore 0 s
   try
-    let code ← session cfg frames realTerminal raw
+    let code ← session cfg frames (← realTerminal) raw
     restore
     return code
   catch e =>

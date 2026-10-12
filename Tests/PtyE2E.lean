@@ -48,13 +48,25 @@ def main (args : List String) : IO UInt32 := do
   step "remote has a tty" "tty; echo T$((1))\n" "/dev/pts/"
   step "initial window size" "stty size; echo S$((1))\n" "30 100"
   step "TERM is forwarded" "echo TERM=$TERM.$((7))\n" "TERM=xterm-huhtest.7"
-  -- without the interrupt, the next marker would only appear after 30 seconds
-  FFI.write master "sleep 30; echo SLEPT$((1))\n".toUTF8
-  IO.sleep 1000
+  -- `sleep` is running once its own process reports in; without the interrupt, the next marker
+  -- would only appear after 30 seconds
+  step "remote command starts" "sh -c 'echo GO$((1)); exec sleep 30'; echo SLEPT$((1))\n" "GO1"
   step "Ctrl-C interrupts the remote command" "\x03echo AFTER$((2+3))\n" "AFTER5" (ms := 5000)
+  let all ← out.get
+  if contains (text all) "SLEPT1" then
+    failures.modify (· + 1); IO.println "  FAIL  the remote command finished instead of being interrupted"
+  -- the client sends the new size and our typed input from separate tasks, so ask until it arrives
   FFI.ptyResize master 45 120
-  IO.sleep 1000
-  step "window resize reaches the remote side" "stty size; echo R$((1))\n" "45 120"
+  let mut resized := false
+  for i in [0:50] do
+    FFI.write master s!"stty size; echo R$(({i}))\n".toUTF8
+    let some n ← expect out s!"R{i}" 20000 (← mark.get) | break
+    let all ← out.get
+    let seen := contains (text (all.extract (← mark.get) n)) "45 120"
+    mark.set n
+    if seen then resized := true; break
+  if resized then IO.println "  ok    window resize reaches the remote side"
+  else failures.modify (· + 1); IO.println "  FAIL  window resize reaches the remote side"
   step "exit status comes back" "exit 7\n" "EXIT=7"
   step "local terminal is restored" "" " icanon"
   let (_, _) ← FFI.wait pid

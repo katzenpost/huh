@@ -17,7 +17,8 @@ def fakeTerminal (input : List ByteArray) :
       | b :: rest => pending.set rest; return b
     writeStdout := fun d => out.modify (· ++ d)
     writeStderr := fun d => err.modify (· ++ d)
-    winsize := pure (24, 80) }
+    winsize := pure (24, 80)
+    resized := pure (IO.sleep 1000000) }
   return (term, out, err)
 
 def run : IO Nat := do
@@ -31,6 +32,20 @@ def run : IO Nat := do
   let out : Outbox ← Std.CloseableChannel.Sync.new
   pumpStdin term out
   t.expect (sameMsgs (← drain out).toList [.stdin (bytes "a"), .stdin (bytes "b"), .stdinEof]) "pumpStdin"
+
+  -- watchSize: one message per change, none when the size is unchanged; stops when `resized` throws
+  let (term, _, _) ← fakeTerminal []
+  let sizes ← IO.mkRef [((24, 80) : UInt16 × UInt16), (24, 80), (30, 100), (30, 100), (40, 120)]
+  let term := { term with
+    winsize := do
+      let s :: rest ← sizes.get | throw (IO.userError "no more sizes")
+      sizes.set rest; return s
+    resized := do
+      if (← sizes.get).isEmpty then throw (IO.userError "done")
+      return pure () }
+  let out : Outbox ← Std.CloseableChannel.Sync.new
+  try watchSize term out (24, 80) catch _ => pure ()
+  t.expect (sameMsgs (← drain out).toList [.windowChange 30 100, .windowChange 40 120]) "watchSize"
 
   -- writer
   let (snd, rcv) := channel
