@@ -27,6 +27,9 @@ def main (args : List String) : IO UInt32 := do
   let dir ← huhDir
   let keyPath := a.key.getD (dir / "id").toString
   let fail (msg : String) : IO UInt32 := do IO.eprintln s!"huh: {msg}"; return 255
+  unless ← System.FilePath.pathExists keyPath do
+    return ← fail (if a.key.isSome then s!"no key at {keyPath}"
+      else s!"no key at {keyPath}; create one with huh-keygen")
   let private_ ← try FFI.filePrivate keyPath catch e => return ← fail (toString e)
   unless private_ do return ← fail s!"{keyPath} must be private to its owner"
   let key ← try readPrivate keyPath catch e => return ← fail (toString e)
@@ -41,5 +44,5 @@ def main (args : List String) : IO UInt32 := do
   let cfg : Client.Config :=
     { key := key, verifyHost := Client.verifyKnownHost (dir / "known_hosts") hostId, pty, cmd }
   let transport := (a.transport.replace "%h" a.host).replace "%p" a.port
-  let code ← Client.run cfg transport
+  let code ← Client.run cfg hostId transport
   IO.Process.exit code.toUInt8

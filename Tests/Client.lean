@@ -74,6 +74,17 @@ def run : IO Nat := do
   t.expect (!r.toBool) "reader rejects client messages"
   let (r, _, _) ← readerRun [.exit (.signal (bytes "INT"))]
   t.expect (r.toOption == some 130) "reader exit by signal"
+
+  -- failureMessage
+  let msg (st : Stage) (exit : Option UInt32) (e : String) :=
+    failureMessage st "h:1" "nc h 1" exit "FP" e
+  t.expect (msg .connecting (some 1) "broken pipe" == "could not connect to h:1: `nc h 1` exited with status 1")
+    "failure: transport exited"
+  t.expect (msg .connecting none "broken pipe" == "could not connect to h:1: broken pipe") "failure: connecting"
+  t.expect (msg .verifyingHost none "peer key rejected" == "not connecting to h:1") "failure: host rejected"
+  t.expect (((msg .authenticating (some 0) "connection closed during handshake").splitOn "authorized_keys").length > 1)
+    "failure: client key rejected"
+  t.expect (msg .established (some 0) "x" == "connection to h:1 lost: x") "failure: established"
   t.finish
 
 end Tests.Client

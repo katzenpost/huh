@@ -118,23 +118,54 @@ def realTerminal : IO Terminal := do
            writeStderr := FFI.write 2, winsize := FFI.ttyWinsize 0,
            resized := do let t ← winch.wait; return discard (IO.wait t) }
 
-/-- Run a session over `transport`'s stdin and stdout, in raw mode when a PTY is requested. -/
-def run (cfg : Config) (transport : String) : IO UInt32 := do
+/-- How far a connection got before it failed. -/
+inductive Stage where
+  | connecting | verifyingHost | authenticating | established
+  deriving BEq, Repr
+
+/-- What to tell the user when the connection to `target` fails at `stage` with error `e`.
+`transportExit` is the transport's status if it has already exited. -/
+def failureMessage (stage : Stage) (target transport : String) (transportExit : Option UInt32)
+    (keyFp e : String) : String :=
+  match stage, transportExit with
+  | .connecting, some c => s!"could not connect to {target}: `{transport}` exited with status {c}"
+  | .connecting, none => s!"could not connect to {target}: {e}"
+  | .verifyingHost, _ => if e == "peer key rejected" then s!"not connecting to {target}"
+    else s!"handshake with {target} failed: {e}"
+  | .authenticating, _ =>
+    s!"{target} ended the handshake after receiving our key {keyFp}; is it in the server's authorized_keys? ({e})"
+  | .established, _ => s!"connection to {target} lost: {e}"
+
+/-- Run a session with `target` over `transport`'s stdin and stdout, in raw mode when a PTY is
+requested. -/
+def run (cfg : Config) (target transport : String) : IO UInt32 := do
   FFI.ignoreSigpipe
   let child ← IO.Process.spawn
     { cmd := "/bin/sh", args := #["-c", transport], stdin := .piped, stdout := .piped }
   let (toNet, child) ← child.takeStdin
-  let frames := Frames.ofStreams (IO.FS.Stream.ofHandle child.stdout) (IO.FS.Stream.ofHandle toNet)
+  let stage ← IO.mkRef Stage.connecting
+  let recv := readFrame (IO.FS.Stream.ofHandle child.stdout)
+  let frames : Frames := ⟨writeFrame (IO.FS.Stream.ofHandle toNet), do
+    let f ← recv
+    if f.isSome && (← stage.get) == .connecting then stage.set .verifyingHost
+    return f⟩
+  let verifyHost pub := do
+    let ok ← cfg.verifyHost pub
+    if ok then stage.set .authenticating
+    return ok
   let saved ← IO.mkRef none
-  let raw := if cfg.pty.isSome then do saved.set (some (← FFI.ttyRaw 0)) else pure ()
+  let established := do
+    stage.set .established
+    if cfg.pty.isSome then saved.set (some (← FFI.ttyRaw 0))
   let restore := do if let some s ← saved.get then FFI.ttyRestore 0 s
   try
-    let code ← session cfg frames (← realTerminal) raw
+    let code ← session { cfg with verifyHost } frames (← realTerminal) established
     restore
     return code
   catch e =>
     restore
-    IO.eprintln s!"huh: {e}"
+    let exit ← try child.tryWait catch _ => pure none
+    IO.eprintln s!"huh: {failureMessage (← stage.get) target transport exit (fingerprint cfg.key.pub) (toString e)}"
     return 255
 
 end Huh.Client
