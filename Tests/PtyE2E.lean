@@ -30,7 +30,9 @@ def main (args : List String) : IO UInt32 := do
   let [huh, port] := args | IO.eprintln "usage: huh-pty-test <huh> <port>"; return 2
   let home := (← IO.getEnv "HOME").getD "/"
   let envp := #[s!"HOME={home}", "PATH=/usr/local/bin:/usr/bin:/bin", "TERM=xterm-huhtest"]
-  let cmd := s!"{huh} -p {port} 127.0.0.1; echo EXIT=$?; stty -a"
+  -- the second session runs in the background so the test can learn its pid and SIGTERM it
+  let cmd := s!"{huh} -p {port} 127.0.0.1; echo EXIT=$?; stty -a; " ++
+    s!"{huh} -t -p {port} 127.0.0.1 </dev/tty & echo PID=$!; wait $!; echo EXIT2=$?; stty -a"
   let (pid, master) ← FFI.spawnPty "/bin/sh" #["sh", "-c", cmd] envp home 30 100
   let out ← IO.mkRef ByteArray.empty
   let _ ← IO.asTask (prio := .dedicated) (collect master out)
@@ -69,6 +71,18 @@ def main (args : List String) : IO UInt32 := do
   else failures.modify (· + 1); IO.println "  FAIL  window resize reaches the remote side"
   step "exit status comes back" "exit 7\n" "EXIT=7"
   step "local terminal is restored" "" " icanon"
+  step "a second session starts" "" "PID="
+  let pid2 ← match ← expect out "\n" 20000 (← mark.get) with
+    | some n =>
+      let all ← out.get
+      let p := (text (all.extract (← mark.get) n)).trimAscii.toString
+      mark.set n
+      pure p
+    | none => pure ""
+  step "the second session is ready" "echo IN$((2))\n" "IN2"
+  discard <| IO.Process.output { cmd := "kill", args := #["-TERM", pid2] }
+  step "huh exits 143 on SIGTERM" "" "EXIT2=143"
+  step "local terminal is restored after SIGTERM" "" " icanon"
   let (_, _) ← FFI.wait pid
   let all ← out.get
   let after := text (all.extract (← mark.get) all.size)

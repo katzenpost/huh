@@ -4,7 +4,7 @@ SHELL := /bin/bash
 LAKE  ?= lake
 BIN   := .lake/build/bin
 
-.PHONY: all build test axioms pipe-test pty-test
+.PHONY: all build test axioms pipe-test pty-test signal-test
 
 all: build
 
@@ -17,10 +17,11 @@ test: build
 axioms: build
 	@./scripts/check-axioms.sh
 
-# Needs socat and nc.
 pipe-test: build
 	@./scripts/pipe-test.sh
 
-# Needs socat and nc.
 pty-test: build
 	@./scripts/pty-test.sh
+
+signal-test: build
+	@./scripts/signal-test.sh

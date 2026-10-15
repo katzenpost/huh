@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Send a random file through huh in pipe mode to huhd behind socat, then check it arrived intact.
+# Send a random file through huh in pipe mode to huhd, then check it arrived intact.
 # SIZE sets the file size in bytes, PORT the local port.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -18,9 +18,9 @@ mkdir -p "$HOME"
 cp "$HOME/.huh/id.pub" "$HOME/.huh/authorized_keys"
 echo "127.0.0.1:$port $(cut -d' ' -f1,2 "$HOME/.huh/host_key.pub")" > "$HOME/.huh/known_hosts"
 
-socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "EXEC:$bin/huhd -e" 2>"$work/server.log" &
+"$bin/huhd" --listen "127.0.0.1:$port" 2>"$work/server.log" &
 srv=$!
-until nc -z 127.0.0.1 "$port" 2>/dev/null; do sleep 0.1; done
+until (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do sleep 0.1; done
 
 head -c "$size" /dev/urandom > "$work/sent"
 start=$(date +%s)

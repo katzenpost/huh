@@ -1,2 +1,0 @@
-# service  type    proto  wait    user   program                 args
-2222       stream  tcp    nowait  alice  /usr/local/bin/huhd     huhd

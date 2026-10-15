@@ -1,0 +1,13 @@
+[Unit]
+Description=huh secure shell
+After=network.target
+
+[Service]
+# The account this server logs clients into; omit for a systemctl --user unit.
+User=alice
+ExecStart=/usr/local/bin/huhd --listen 0.0.0.0:2222
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

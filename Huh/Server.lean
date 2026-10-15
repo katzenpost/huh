@@ -9,21 +9,18 @@ import Huh.Secure
 import Huh.Session
 import Huh.Keys
 import Huh.Log
+import Huh.Net
 import Std.Sync.Channel
+import Std.Async.Signal
+import Std.Data.HashMap
 
 /-! # The server end of a session
 
 `session` runs one connection over a pair of frame functions and a process spawner, and returns
-once the exit status is sent; `serve` connects it to stdin, stdout and real processes. -/
+once the exit status is sent; `listen` accepts TCP connections and serves each with real
+processes. -/
 
 namespace Huh
-
-/-- Sending and receiving whole frames; `recv` is `none` at end of stream. -/
-structure Frames where
-  send : ByteArray → IO Unit
-  recv : IO (Option ByteArray)
-
-def Frames.ofStreams (inp out : IO.FS.Stream) : Frames := ⟨writeFrame out, readFrame inp⟩
 
 /-- Runs `a` and `b` concurrently and returns `a`'s result once it is done, failing as soon as
 either fails. -/
@@ -118,12 +115,12 @@ partial def reader (frames : Frames) (rcv : Receiver) (phase : Phase) (proc : Op
     | _, none => hangup "protocol violation"
   reader frames rcv phase (some proc) spawn out
 
-/-- One connection: handshake, then serve the session until the exit status is sent. -/
+/-- One connection: handshake, then serve the session until the exit status is sent. The
+handshake reads with `handshakeRecv`, which can give up early. -/
 def session (cfg : Config) (peer : String) (frames : Frames) (spawn : Spawner)
-    (onEstablished : IO Unit := pure ()) : IO Unit := do
-  let est ← handshake false cfg.hostKey frames.send frames.recv
+    (handshakeRecv : IO (Option ByteArray) := frames.recv) : IO Unit := do
+  let est ← handshake false cfg.hostKey frames.send handshakeRecv
     (fun k => pure (cfg.authorized.contains k))
-  onEstablished
   cfg.log logInfo s!"{peer}: accepted {fingerprint est.remoteStatic}"
   let (snd, rcv) := split est.transport
   let out : Outbox ← Std.CloseableChannel.Sync.new
@@ -170,22 +167,109 @@ def spawnReal (peer : String) : Spawner := fun pty cmd => do
              readStdout := FFI.read o maxData.toUSize,
              readStderr := some (FFI.read e maxData.toUSize), wait := wait pid }
 
-/-- Serve the connection on stdin and stdout, then end the process. -/
-def serve (cfg : Config) : IO Unit := do
-  FFI.ignoreSigpipe
-  let peer := (← IO.getEnv "REMOTE_ADDR").getD "unknown"
-  let established ← IO.mkRef false
-  discard <| IO.asTask (prio := .dedicated) do
-    IO.sleep handshakeTimeoutMs
-    unless ← established.get do
-      cfg.log logWarning s!"{peer}: handshake timed out"
-      IO.Process.exit 1
+/-! ## Listening -/
+
+open Std.Async Std.Net
+
+/-- Serve one accepted connection until its session ends. Failures are logged, never thrown. -/
+def connection (cfg : Config) (c : Net.Socket) (spawn : String → Spawner := spawnReal)
+    (timeoutMs : Nat := handshakeTimeoutMs.toNat) : IO Unit := do
+  let peer ← try pure (toString (← c.getPeerName)) catch _ => pure "unknown"
   try
-    session cfg peer (Frames.ofStreams (← IO.getStdin) (← IO.getStdout)) (spawnReal peer)
-      (established.set true)
-    IO.Process.exit 0
+    let deadline ← Net.deadline timeoutMs
+    session cfg peer (Net.frames c) (spawn peer) (readFrameWith (Net.recvChunkBefore c deadline))
+  catch e => cfg.log logWarning s!"{peer}: {e}"
+  try c.shutdown.block catch _ => pure ()
+
+def bind (addr : SocketAddress) : IO TCP.Socket.Server := do
+  let srv ← TCP.Socket.Server.mk
+  srv.bind addr
+  srv.listen 128
+  srv.noDelay
+  srv.keepAlive true 60
+  return srv
+
+/-- How long a shutdown waits for hung-up sessions to report their exit before killing them. -/
+def shutdownGraceMs : Nat := 5000
+
+/-- One served connection: how to signal its child, once there is one, and whether it is over. -/
+structure Conn where
+  id : Nat
+  signal : IO.Ref (Option (String → IO Unit))
+  done : IO.Promise Unit
+
+/-- The connections being served, so that a shutdown can hang them up and wait for them. -/
+structure Live where
+  stopping : IO.Ref Bool
+  next : IO.Ref Nat
+  conns : IO.Ref (Std.HashMap Nat Conn)
+
+def Live.new : IO Live := return ⟨← IO.mkRef false, ← IO.mkRef 0, ← IO.mkRef {}⟩
+
+def Live.add (live : Live) : IO Conn := do
+  let id ← live.next.modifyGet fun n => (n, n + 1)
+  let c : Conn := ⟨id, ← IO.mkRef none, ← IO.Promise.new⟩
+  live.conns.modify (·.insert id c)
+  return c
+
+def Live.remove (live : Live) (c : Conn) : IO Unit := do
+  live.conns.modify (·.erase c.id)
+  c.done.resolve ()
+
+/-- Remember how to signal what `spawn` starts. A child started after a shutdown began is hung
+up at once; the shutdown may have looked at this connection before the child existed. -/
+def Live.track (live : Live) (c : Conn) (spawn : Spawner) : Spawner := fun pty cmd => do
+  let p ← spawn pty cmd
+  c.signal.set (some p.signal)
+  if ← live.stopping.get then try p.signal "HUP" catch _ => pure ()
+  return p
+
+def Live.signalAll (live : Live) (name : String) : IO Unit := do
+  for (_, c) in ← live.conns.get do
+    if let some signal ← c.signal.get then try signal name catch _ => pure ()
+
+/-- Stop accepting, hang up every child, and wait up to `graceMs` for the sessions to send their
+exit status. Children still running after that are killed. -/
+def Live.shutdown (live : Live) (graceMs : Nat := shutdownGraceMs) : IO Unit := do
+  live.stopping.set true
+  live.signalAll "HUP"
+  let pending := (← live.conns.get).toList.map fun (_, c) => c.done.result!
+  let all ← IO.mapTasks (fun _ => pure ()) pending
+  let timer ← IO.asTask (IO.sleep graceMs.toUInt32)
+  discard <| IO.waitAny [all.map fun _ => (), timer.map fun _ => ()]
+  live.signalAll "KILL"
+
+/-- Accept connections until a shutdown begins, serving each on its own task. -/
+partial def acceptLoop (live : Live) (cfg : Config) (srv : TCP.Socket.Server)
+    (spawn : String → Spawner := spawnReal) (timeoutMs : Nat := handshakeTimeoutMs.toNat) :
+    IO Unit := do
+  try
+    let c ← srv.accept.block
+    if ← live.stopping.get then
+      try c.shutdown.block catch _ => pure ()
+      return
+    let conn ← live.add
+    discard <| IO.asTask (prio := .dedicated) do
+      connection cfg c (fun peer => live.track conn (spawn peer)) timeoutMs
+      live.remove conn
   catch e =>
-    cfg.log logWarning s!"{peer}: {e}"
-    IO.Process.exit 1
+    cfg.log logWarning s!"accept: {e}"
+    IO.sleep 100
+  acceptLoop live cfg srv spawn timeoutMs
+
+/-- Listen on every address and serve connections until SIGTERM or SIGINT, then shut down. Accept
+loops are still blocked in `accept` on return, so the caller should end the process. -/
+def listen (cfg : Config) (addrs : Array SocketAddress) : IO Unit := do
+  FFI.ignoreSigpipe
+  let term ← (← Signal.Waiter.mk .sigterm false).wait
+  let int ← (← Signal.Waiter.mk .sigint false).wait
+  let live ← Live.new
+  for a in addrs do
+    let srv ← bind a
+    cfg.log logInfo s!"listening on {a}"
+    discard <| IO.asTask (prio := .dedicated) (acceptLoop live cfg srv)
+  discard <| IO.waitAny [term, int]
+  cfg.log logInfo "shutting down"
+  live.shutdown
 
 end Huh.Server

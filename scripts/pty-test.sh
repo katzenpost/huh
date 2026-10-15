@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run an interactive huh session on a PTY against huhd behind socat; see Tests/PtyE2E.lean.
+# Run an interactive huh session on a PTY against huhd; see Tests/PtyE2E.lean.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bin=$PWD/.lake/build/bin
@@ -17,9 +17,9 @@ mkdir -p "$HOME"
 cp "$HOME/.huh/id.pub" "$HOME/.huh/authorized_keys"
 echo "127.0.0.1:$port $(cut -d' ' -f1,2 "$HOME/.huh/host_key.pub")" > "$HOME/.huh/known_hosts"
 
-socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "EXEC:$bin/huhd -e" 2>"$work/server.log" &
+"$bin/huhd" --listen "127.0.0.1:$port" 2>"$work/server.log" &
 srv=$!
-until nc -z 127.0.0.1 "$port" 2>/dev/null; do sleep 0.1; done
+until (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do sleep 0.1; done
 
 if ! "$bin/huh-pty-test" "$bin/huh" "$port"; then
   echo "server log:"; cat "$work/server.log"; exit 1
