@@ -97,20 +97,22 @@ def ask (question : String) : IO Bool := do
   let answer ← tty.getLine
   return answer.trimAscii.toString == "yes"
 
-/-- Known key: accept. Different key: refuse. Unknown host: ask, and remember on yes. -/
+/-- Known key: accept. Different key: refuse. Unknown host: ask, and remember it hashed on yes. -/
 def verifyKnownHost (knownHosts : System.FilePath) (hostId : String) (pub : ByteArray) : IO Bool := do
-  let known := (parseKnownHosts (← readTextOrEmpty knownHosts)).filter (·.1 == hostId)
-  if known.any (·.2 == pub) then return true
-  if !known.isEmpty then
+  match checkHost (← readTextOrEmpty knownHosts) hostId pub with
+  | .known => return true
+  | .changed lines =>
+    let which := ", ".intercalate (lines.map toString)
     IO.eprintln s!"huh: THE HOST KEY FOR {hostId} HAS CHANGED to {fingerprint pub}; refusing."
-    IO.eprintln s!"huh: remove the old line from {knownHosts} if the change is expected."
+    IO.eprintln s!"huh: if the change is expected, remove line {which} of {knownHosts}."
     return false
-  let yes ← ask s!"{hostId} is unknown, with key {fingerprint pub}.\nConnect and remember it? (yes/no) "
-  if yes then
-    if let some dir := knownHosts.parent then IO.FS.createDirAll dir
-    let h ← IO.FS.Handle.mk knownHosts .append
-    h.putStrLn (hostId ++ " " ++ publicLine pub)
-  return yes
+  | .unknown =>
+    let yes ← ask s!"{hostId} is unknown, with key {fingerprint pub}.\nConnect and remember it? (yes/no) "
+    if yes then
+      if let some dir := knownHosts.parent then IO.FS.createDirAll dir
+      let h ← IO.FS.Handle.mk knownHosts .append
+      h.putStrLn (knownHostLine (← IO.getRandomBytes 32) hostId pub)
+    return yes
 
 def realTerminal : IO Terminal := do
   let winch ← Std.Async.Signal.Waiter.mk .sigwinch true

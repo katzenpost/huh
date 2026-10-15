@@ -51,7 +51,8 @@ On the server, as the account people will log in to, make a host key and authori
     huh-keygen -f ~/.huh/host_key
     cat id.pub >> ~/.huh/authorized_keys      # the client's id.pub, copied over
 
-A public key line looks like `huh-mlkem768hx25519 <hex> [comment]`.
+A public key line looks like `huh-mlkem768hx25519 <hex> [comment]`. To give clients a
+ready known-hosts line for this server, see [Known hosts](#known-hosts).
 
 ## Run the server
 
@@ -126,18 +127,38 @@ data. With a terminal:
 - 255 if the connection failed
 - 143 if `huh` itself got SIGTERM; your terminal is restored first and the remote side is hung up
 
-### Host keys
+### Known hosts
 
-The first time you connect to a `host:port`, `huh` shows the server's key fingerprint and asks
-whether to trust it. Answering `yes` saves the key in `~/.huh/known_hosts`. If the key later
-changes, `huh` refuses to connect; delete the old line from `known_hosts` if the change is
-expected.
+`~/.huh/known_hosts` records the key of every server you trust, one per line:
 
-To trust a server without the prompt, add a line yourself:
+    |b2|<salt>|<hash> huh-mlkem768hx25519 <hex>
+    server.example.org:2222 huh-mlkem768hx25519 <hex>
 
-    echo "server.example.org:2222 $(cut -d' ' -f1,2 host_key.pub)" >> ~/.huh/known_hosts
+The first field names the server as `host:port`, written exactly as you type it on the command
+line, with the port (`huh -p 2200 server` is `server:2200`). It is either:
 
-The host part is written exactly as you type it on the command line, with the port.
+- **hashed:** the BLAKE2s hash of `host:port`, keyed with a random 32-byte salt, both in hex.
+  This is what `huh` and `huh-keygen` write, so the file doesn't reveal which servers you use.
+- **plain:** `host:port` in plain text. `huh` reads these too.
+
+Blank lines and lines starting with `#` are ignored.
+
+The first time you connect to a `host:port` that isn't in the file, `huh` shows the server's key
+fingerprint and asks whether to trust it. Answering `yes` adds a hashed line.
+
+If a server's key later changes, `huh` refuses to connect and names the line holding the old key.
+Delete that line if you expect the change.
+
+To trust a server without the prompt, get its `host_key.pub` and add a line with `huh-keygen -H`.
+This prints a hashed known-hosts line for a public key; it never creates a key:
+
+    huh-keygen -H server.example.org:2222 -f host_key.pub >> ~/.huh/known_hosts
+
+`-f` takes a `.pub` file, or a private key file, in which case it reads the `.pub` beside it.
+Without `-f`, it uses `~/.huh/host_key`. That lets a server's admin print the line for clients
+directly:
+
+    huh-keygen -H server.example.org:2222
 
 ## Tests
 
