@@ -7,16 +7,14 @@ import Huh.FFI
 
 /-! # Server logging
 
-Under inetd stderr is the connection, so the server logs to syslog unless told stderr is safe:
-by `-e`, or by systemd setting `JOURNAL_STREAM`. -/
+The server logs to stderr, which systemd sends to the journal, or to syslog with `--syslog`. -/
 
 namespace Huh
 
 def logInfo : UInt32 := 6
 def logWarning : UInt32 := 4
 
-def log (toStderr : Bool) (prio : UInt32) (msg : String) : IO Unit := do
-  if toStderr || (← IO.getEnv "JOURNAL_STREAM").isSome then IO.eprintln msg
-  else FFI.syslog prio msg
+def log (toSyslog : Bool) (prio : UInt32) (msg : String) : IO Unit :=
+  if toSyslog then FFI.syslog prio msg else IO.eprintln msg
 
 end Huh

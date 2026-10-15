@@ -3,13 +3,12 @@ import Huh.Client
 open Huh
 
 def usage : String :=
-  "usage: huh [-i key] [-t|-T] [-p port] [--transport cmd] host [command...]"
+  "usage: huh [-i key] [-t|-T] [-p port] host [command...]"
 
 structure Args where
   key : Option String := none
   pty : Option Bool := none
-  port : String := "2222"
-  transport : String := "nc %h %p"
+  port : UInt16 := 2222
   host : String := ""
   cmd : List String := []
 
@@ -17,8 +16,7 @@ def parseArgs (a : Args) : List String → Option Args
   | "-i" :: k :: rest => parseArgs { a with key := some k } rest
   | "-t" :: rest => parseArgs { a with pty := some true } rest
   | "-T" :: rest => parseArgs { a with pty := some false } rest
-  | "-p" :: p :: rest => parseArgs { a with port := p } rest
-  | "--transport" :: t :: rest => parseArgs { a with transport := t } rest
+  | "-p" :: p :: rest => do parseArgs { a with port := ← Net.parsePort p } rest
   | host :: cmd => if host.startsWith "-" then none else some { a with host, cmd }
   | [] => none
 
@@ -40,6 +38,5 @@ def main (args : List String) : IO UInt32 := do
   let hostId := s!"{a.host}:{a.port}"
   let cfg : Client.Config :=
     { key := key, verifyHost := Client.verifyKnownHost (dir / "known_hosts") hostId, pty, cmd }
-  let transport := (a.transport.replace "%h" a.host).replace "%p" a.port
-  let code ← Client.run cfg transport
+  let code ← Client.run cfg a.host a.port
   IO.Process.exit code.toUInt8

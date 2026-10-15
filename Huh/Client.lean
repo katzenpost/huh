@@ -9,7 +9,7 @@ import Std.Async.Signal
 /-! # The client end of a session
 
 `session` runs one connection over a pair of frame functions and a terminal, and returns the
-remote exit code; `run` connects it to a transport command and the real terminal. -/
+remote exit code; `run` connects it to a TCP server and the real terminal. -/
 
 namespace Huh.Client
 
@@ -88,7 +88,7 @@ def session (cfg : Config) (frames : Frames) (term : Terminal)
   out.close
   return code
 
-/-! ## The real terminal and transport -/
+/-! ## The real terminal and network -/
 
 def ask (question : String) : IO Bool := do
   let tty ← IO.FS.Handle.mk "/dev/tty" .readWrite
@@ -118,22 +118,30 @@ def realTerminal : IO Terminal := do
            writeStderr := FFI.write 2, winsize := FFI.ttyWinsize 0,
            resized := do let t ← winch.wait; return discard (IO.wait t) }
 
-/-- Run a session over `transport`'s stdin and stdout, in raw mode when a PTY is requested. -/
-def run (cfg : Config) (transport : String) : IO UInt32 := do
+/-- Run a session with `host`, in raw mode when a PTY is requested. SIGTERM ends it early with
+exit code 143, after the terminal is restored. -/
+def run (cfg : Config) (host : String) (port : UInt16) : IO UInt32 := do
   FFI.ignoreSigpipe
-  let child ← IO.Process.spawn
-    { cmd := "/bin/sh", args := #["-c", transport], stdin := .piped, stdout := .piped }
-  let (toNet, child) ← child.takeStdin
-  let frames := Frames.ofStreams (IO.FS.Stream.ofHandle child.stdout) (IO.FS.Stream.ofHandle toNet)
+  let term ← (← Std.Async.Signal.Waiter.mk .sigterm false).wait
   let saved ← IO.mkRef none
   let raw := if cfg.pty.isSome then do saved.set (some (← FFI.ttyRaw 0)) else pure ()
   let restore := do if let some s ← saved.get then FFI.ttyRestore 0 s
+  let sock ← IO.mkRef none
+  let hangup := do
+    if let some s ← sock.get then try (s : Net.Socket).shutdown.block catch _ => pure ()
   try
-    let code ← session cfg frames (← realTerminal) raw
+    let conversation ← IO.asTask (prio := .dedicated) do
+      let s ← Net.dial host port
+      sock.set (some s)
+      session cfg (Net.frames s) (← realTerminal) raw
+    let terminated := (ExceptT.run term).map fun _ => .ok (128 + signalNumber "TERM")
+    let code ← IO.ofExcept (← IO.waitAny [conversation, terminated])
     restore
+    hangup
     return code
   catch e =>
     restore
+    hangup
     IO.eprintln s!"huh: {e}"
     return 255
 
