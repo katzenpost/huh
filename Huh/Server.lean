@@ -264,8 +264,10 @@ def listen (cfg : Config) (addrs : Array SocketAddress) : IO Unit := do
   let term ← (← Signal.Waiter.mk .sigterm false).wait
   let int ← (← Signal.Waiter.mk .sigint false).wait
   let live ← Live.new
-  for a in addrs do
-    let srv ← bind a
+  -- bind everything first, so a bad address fails before any connection is served
+  let srvs ← addrs.mapM fun a => do
+    try pure (a, ← bind a) catch e => throw (IO.userError s!"listen on {a}: {e}")
+  for (a, srv) in srvs do
     cfg.log logInfo s!"listening on {a}"
     discard <| IO.asTask (prio := .dedicated) (acceptLoop live cfg srv)
   discard <| IO.waitAny [term, int]

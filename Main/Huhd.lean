@@ -32,6 +32,6 @@ def main (args : List String) : IO UInt32 := do
   let kp ← try readPrivate hostKey catch e => return ← fail (toString e)
   let keys := parseAuthorized (← readTextOrEmpty authorized)
   try Server.listen { hostKey := kp, authorized := keys, log := log a.syslog } addrs
-  catch e => return ← fail (toString e)
+  catch e => discard <| fail (toString e); IO.Process.exit 1
   -- the accept loops never return, and would keep the process alive
   IO.Process.exit 0
