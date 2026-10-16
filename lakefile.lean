@@ -9,7 +9,7 @@ require LeanBench from git "https://github.com/alok/LeanBench" @ "main"
 require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
 
 -- Directly, for Argon2 (CryptWalker.KDF.Argon2), which uproar's pinned revision predates.
-require CryptWalker from git "https://github.com/katzenpost/CryptWalker.git" @ "argon2"
+require CryptWalker from git "https://github.com/katzenpost/CryptWalker.git" @ "main"
 
 @[default_target]
 lean_lib Huh

@@ -3,7 +3,9 @@
 A small remote shell written in Lean 4. `huh` is the client and `huhd` the server. They talk
 over TCP using the Noise `pqXX` handshake with hybrid ML-KEM-768 + X25519, ChaCha20-Poly1305
 and BLAKE2s (via [uproar](https://github.com/katzenpost/uproar)). Each side authenticates the
-other by its static public key, much as SSH does with keys only.
+other by its static public key, much as SSH does with keys only. A client's private key can be
+encrypted under a passphrase, stretched with Argon2id (via
+[CryptWalker](https://github.com/katzenpost/CryptWalker)).
 
 ## Build
 
@@ -29,12 +31,12 @@ To install them:
 
 Everything lives in `~/.huh/`:
 
-| File              | Who uses it | What it holds                                         |
-|-------------------|-------------|-------------------------------------------------------|
-| `id.private`, `id.pub`             | `huh`  | your private key and its public half              |
-| `known_hosts`                       | `huh`  | the host keys of servers you have connected to    |
-| `host_key.private`, `host_key.pub`  | `huhd` | the server's private key and its public half      |
-| `authorized_keys`                   | `huhd` | public keys allowed to log in, one per line       |
+| File                               | Who uses it | What it holds                                  |
+|------------------------------------|-------------|------------------------------------------------|
+| `id.private`, `id.pub`             | `huh`       | your private key and its public half           |
+| `known_hosts`                      | `huh`       | the host keys of servers you have connected to |
+| `host_key.private`, `host_key.pub` | `huhd`      | the server's private key and its public half   |
+| `authorized_keys`                  | `huhd`      | public keys allowed to log in, one per line    |
 
 Private key file names always end in `.private`, and the public half sits beside it as `.pub`.
 `huh`, `huhd` and `huh-keygen -p` refuse a private key file with any other name. Key files from
@@ -52,8 +54,8 @@ This asks for a passphrase, writes `~/.huh/id.private` and `~/.huh/id.pub`, and 
 fingerprint. Use `-f path` to write somewhere else; `-f work` and `-f work.private` both mean
 `work.private` and `work.pub`.
 
-The passphrase encrypts the private key, and `huh` asks for it each time it connects. Leaving it
-empty stores the key unencrypted. `-N passphrase` sets it without asking, for scripts (`-N ""`
+The passphrase encrypts the private key, and `huh` asks for it each time it connects, on the
+terminal with echo off, allowing three tries. Leaving it empty stores the key unencrypted. `-N passphrase` sets it without asking, for scripts (`-N ""`
 for none). To change or remove the passphrase of an existing key:
 
     huh-keygen -p                    # ~/.huh/id.private, or -f path
@@ -78,6 +80,24 @@ encrypted, so a server can start on its own after a reboot. `huhd` refuses an en
 
 A public key line looks like `huh-mlkem768hx25519 <hex> [comment]`. To give clients a
 ready known-hosts line for this server, see [Known hosts](#known-hosts).
+
+### huh-keygen
+
+    huh-keygen [-f keyfile] [-C comment] [-N passphrase]   # a client key
+    huh-keygen --host [-f keyfile] [-C comment]            # a host key
+    huh-keygen -p [-f keyfile] [-N passphrase]             # change a client key's passphrase
+    huh-keygen -H host:port [-f keyfile]                   # print a known-hosts line
+
+| Option          | What it does                                                                   |
+|-----------------|--------------------------------------------------------------------------------|
+| `-f keyfile`    | the key file; `.private` is added if missing. Default `~/.huh/id.private`, or `~/.huh/host_key.private` with `--host` and `-H` |
+| `-C comment`    | comment written after the public key                                           |
+| `-N passphrase` | the new passphrase, without asking; `""` for none                              |
+| `-p`            | change or remove the passphrase of an existing client key                      |
+| `--host`        | make a host key: never encrypted, never asks                                   |
+| `-H host:port`  | print a hashed known-hosts line for the key's `.pub`                           |
+
+`huh-keygen` never overwrites an existing key file.
 
 ## Run the server
 
@@ -190,7 +210,7 @@ directly:
     make test          # unit tests
     make axioms        # the proofs use only Lean's own axioms
     make pipe-test     # a file sent through huh to a local huhd arrives intact (SIZE=bytes)
-    make pty-test      # an interactive session on a pseudo-terminal
+    make pty-test      # an interactive session on a pseudo-terminal, and the passphrase prompt
     make signal-test   # SIGTERM handling in huh and huhd
 
 ## License
