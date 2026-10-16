@@ -13,10 +13,10 @@ trap '[ -n "$srv" ] && kill "$srv" 2>/dev/null; rm -rf "$work"' EXIT
 export HOME=$work/home
 mkdir -p "$HOME"
 
-"$bin/huh-keygen" -C client >/dev/null
-"$bin/huh-keygen" -f "$HOME/.huh/host_key" >/dev/null
+"$bin/huh-keygen" -C client -N "" >/dev/null
+"$bin/huh-keygen" --host >/dev/null
 cp "$HOME/.huh/id.pub" "$HOME/.huh/authorized_keys"
-"$bin/huh-keygen" -f "$HOME/.huh/host_key" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
+"$bin/huh-keygen" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
 
 "$bin/huhd" --listen "127.0.0.1:$port" 2>"$work/server.log" &
 srv=$!
