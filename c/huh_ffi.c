@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -284,6 +285,73 @@ LEAN_EXPORT lean_obj_res huh_tty_winsize(uint32_t fd) {
 
 LEAN_EXPORT lean_obj_res huh_isatty(uint32_t fd) {
   return lean_io_result_mk_ok(lean_box(isatty((int)fd) ? 1 : 0));
+}
+
+/* Set by the handlers huh_read_passphrase installs while echo is off. */
+static volatile sig_atomic_t passphrase_signal;
+
+static void passphrase_handler(int sig) { passphrase_signal = sig; }
+
+static void write_all(int fd, const char *s, size_t n) {
+  while (n > 0) {
+    ssize_t w = write(fd, s, n);
+    if (w < 0) { if (errno == EINTR) continue; return; }
+    s += w;
+    n -= (size_t)w;
+  }
+}
+
+/* Print `prompt` on /dev/tty and read one line from it with echo off, as readpassphrase(3)
+   does. A signal that arrives meanwhile restores the terminal first and is then re-raised, so
+   Ctrl-C never leaves echo off. */
+LEAN_EXPORT lean_obj_res huh_read_passphrase(b_lean_obj_arg prompt) {
+  int fd = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+  if (fd < 0) return io_user_error("no terminal to read a passphrase from");
+  struct termios saved, quiet;
+  if (tcgetattr(fd, &saved) < 0) { close(fd); return io_user_error("no terminal to read a passphrase from"); }
+  static const int sigs[] = { SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP };
+  enum { NSIGS = sizeof(sigs) / sizeof(sigs[0]) };
+  struct sigaction act, old[NSIGS];
+  memset(&act, 0, sizeof(act));
+  act.sa_handler = passphrase_handler; /* no SA_RESTART: read must return EINTR */
+  sigemptyset(&act.sa_mask);
+  passphrase_signal = 0;
+  for (int i = 0; i < NSIGS; i++) sigaction(sigs[i], &act, &old[i]);
+  quiet = saved;
+  quiet.c_lflag &= ~(tcflag_t)(ECHO | ECHONL);
+  tcsetattr(fd, TCSAFLUSH, &quiet);
+  write_all(fd, lean_string_cstr(prompt), strlen(lean_string_cstr(prompt)));
+  char buf[1024];
+  size_t len = 0;
+  int failed = 0;
+  for (;;) {
+    /* The handler may run on another of the runtime's threads, leaving this read blocked, so
+       wake up now and then to look for a signal. */
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int ready = poll(&pfd, 1, 100);
+    if (passphrase_signal) break;
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready == 0) continue;
+    char c;
+    ssize_t r = read(fd, &c, 1);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) { failed = r < 0 || len == 0; break; }
+    if (c == '\n' || c == '\r') break;
+    if (len < sizeof(buf)) buf[len++] = c;
+  }
+  tcsetattr(fd, TCSAFLUSH, &saved);
+  write_all(fd, "\n", 1);
+  close(fd);
+  for (int i = 0; i < NSIGS; i++) sigaction(sigs[i], &old[i], NULL);
+  if (passphrase_signal) {
+    explicit_bzero(buf, sizeof(buf));
+    raise(passphrase_signal);
+    return io_user_error("interrupted");
+  }
+  if (failed) { explicit_bzero(buf, sizeof(buf)); return io_user_error("no passphrase read"); }
+  lean_object *out = lean_mk_string_from_bytes(buf, len);
+  explicit_bzero(buf, sizeof(buf));
+  return lean_io_result_mk_ok(out);
 }
 
 /* (user name, home, shell) of the effective user. */
