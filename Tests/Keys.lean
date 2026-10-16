@@ -6,6 +6,76 @@ namespace Tests.Keys
 
 def seed (b : UInt8) : ByteArray := ByteArray.mk (Array.replicate 32 b)
 
+/-- Small Argon2id parameters, so the tests stay fast. -/
+def tinyKdf : KdfParams := { memoryKiB := 8, passes := 1, lanes := 1 }
+
+def contains (s pat : String) : Bool := (s.splitOn pat).length > 1
+
+def flip (b : ByteArray) (i : Nat) : ByteArray := b.set! i (b.get! i ^^^ 1)
+
+def encrypted (t : Suite) : IO Unit := do
+  let salt := ByteArray.mk (Array.replicate 16 9)
+  let nonce := ByteArray.mk (Array.replicate 12 8)
+  let .ok file := encryptSeed tinyKdf salt nonce "hunter2" (seed 1)
+    | t.expect false "encrypt a seed"
+  t.expect (file.size == encryptedKeyLen) "encrypted key size"
+  t.expect (decryptSeed file "hunter2" == .ok (seed 1)) "decrypt with the passphrase"
+  t.expect (!(decryptSeed file "hunter3").toBool) "wrong passphrase"
+  t.expect (!(decryptSeed file "").toBool) "empty passphrase"
+  for (i, what) in [(3, "magic"), (8, "memory"), (12, "passes"), (25, "salt"), (40, "nonce"),
+                    (50, "ciphertext"), (encryptedKeyLen - 1, "tag")] do
+    t.expect (!(decryptSeed (flip file i) "hunter2").toBool) s!"flipped bit in the {what}"
+  t.expect (!(decryptSeed (file.extract 0 (file.size - 1)) "hunter2").toBool) "truncated"
+  -- 2 GiB: refused before Argon2 runs, or this test would take a long time
+  let big := (file.set! 8 0).set! 9 0 |>.set! 10 0x20 |>.set! 11 0
+  t.expect (match decryptSeed big "hunter2" with
+    | .error e => contains e "too much" | .ok _ => false) "too much memory asked for"
+  let lanes := (file.set! 16 0).set! 17 1
+  t.expect (!(decryptSeed lanes "hunter2").toBool) "too many lanes"
+  t.expect (match parseKeyFile (seed 1) with | .ok (.plain s) => s == seed 1 | _ => false)
+    "a 32-byte file is a plain key"
+  t.expect (match parseKeyFile file with | .ok (.encrypted _) => true | _ => false)
+    "an encrypted key file"
+  t.expect (!(parseKeyFile (ByteArray.mk (Array.replicate 33 0))).toBool) "not a key file"
+  let answers ← IO.mkRef ["nope", "hunter2"]
+  let ask : IO String := do
+    let a ← answers.get
+    answers.set a.tail
+    return a.headD ""
+  let warned ← IO.mkRef 0
+  let kp ← unlockWith file ask (fun _ => warned.modify (· + 1))
+  t.expect (some kp.pub == ((keyPairOfSeed (seed 1)).toOption.map (·.pub)) && (← warned.get) == 1)
+    "unlock on the second attempt"
+  answers.set ["a", "b", "c", "hunter2"]
+  t.throws "three wrong passphrases" (unlockWith file ask (fun _ => pure ()))
+
+def names (t : Suite) : IO Unit := do
+  t.expect (privatePath "x" == "x.private") "privatePath appends .private"
+  t.expect (privatePath "d/x.private" == "d/x.private") "privatePath keeps .private"
+  t.expect (publicPath "d/x.private" == "d/x.pub") "publicPath"
+  t.expect ((checkPrivateName "d/x.private").toBool) ".private name accepted"
+  t.expect (!(checkPrivateName "d/x").toBool) "name without .private refused"
+  t.expect (!(checkPrivateName "d/x.pub").toBool) ".pub name refused"
+
+def files (t : Suite) : IO Unit := do
+  let dir ← IO.FS.createTempDir
+  let .ok enc := encryptSeed tinyKdf (ByteArray.mk (Array.replicate 16 9))
+      (ByteArray.mk (Array.replicate 12 8)) "pw" (seed 2)
+    | t.expect false "encrypt a seed"
+  IO.FS.writeBinFile (dir / "plain.private") (seed 1)
+  IO.FS.writeBinFile (dir / "enc.private") enc
+  IO.FS.writeBinFile (dir / "old") (seed 1)
+  let hk ← readHostKey (dir / "plain.private")
+  t.expect (some hk.pub == ((keyPairOfSeed (seed 1)).toOption.map (·.pub))) "read a host key"
+  match ← (readHostKey (dir / "enc.private")).toBaseIO with
+  | .error e => t.expect (contains (toString e) "host keys must not be encrypted") "encrypted host key"
+  | .ok _ => t.expect false "encrypted host key refused"
+  match ← (readKeyFile (dir / "old.private")).toBaseIO with
+  | .error e => t.expect (contains (toString e) "mv ") "old key name: say how to rename"
+  | .ok _ => t.expect false "old key name refused"
+  t.throws "key file without .private" (readKeyFile (dir / "old"))
+  IO.FS.removeDirAll dir
+
 def run : IO Nat := do
   let t ← Suite.new "keys"
   t.expect (!(keyPairOfSeed (ByteArray.mk (Array.replicate 31 0))).toBool) "31-byte seed"
@@ -57,6 +127,9 @@ def run : IO Nat := do
   let fp := fingerprint a.pub
   t.expect (fp.startsWith "BLAKE2s:" && fp.length == 8 + 32) "fingerprint format"
   t.expect (fp == fingerprint a'.pub && fp != fingerprint b.pub) "fingerprint identifies the key"
+  encrypted t
+  names t
+  files t
   t.finish
 
 end Tests.Keys

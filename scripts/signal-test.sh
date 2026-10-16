@@ -16,10 +16,10 @@ failures=0
 check() { if eval "$2"; then echo "  ok    $1"; else echo "  FAIL  $1"; failures=$((failures + 1)); fi; }
 wait_for() { for _ in $(seq 100); do eval "$1" && return 0; sleep 0.1; done; return 1; }
 
-"$bin/huh-keygen" -C client >/dev/null
-"$bin/huh-keygen" -f "$HOME/.huh/host_key" >/dev/null
+"$bin/huh-keygen" -C client -N "" >/dev/null
+"$bin/huh-keygen" --host >/dev/null
 cp "$HOME/.huh/id.pub" "$HOME/.huh/authorized_keys"
-"$bin/huh-keygen" -f "$HOME/.huh/host_key" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
+"$bin/huh-keygen" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
 
 start_server() {
   "$bin/huhd" --listen "127.0.0.1:$port" 2>>"$work/server.log" &

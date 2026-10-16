@@ -35,6 +35,8 @@ opaque spawnPipes (path : @& String) (argv envp : @& Array String) (dir : @& Str
 /-- `(rows, cols)`. -/
 @[extern "huh_tty_winsize"] opaque ttyWinsize (fd : UInt32) : IO (UInt16 × UInt16)
 @[extern "huh_isatty"] opaque isatty (fd : UInt32) : IO Bool
+/-- Print `prompt` on `/dev/tty` and read a line from it with echo off. -/
+@[extern "huh_read_passphrase"] opaque readPassphrase (prompt : @& String) : IO String
 
 /-- `(user, home, shell)` of the effective user. -/
 @[extern "huh_getpw"] opaque getpw : IO (String × String × String)

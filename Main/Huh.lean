@@ -23,11 +23,18 @@ def parseArgs (a : Args) : List String → Option Args
 def main (args : List String) : IO UInt32 := do
   let some a := parseArgs {} args | IO.eprintln usage; return 2
   let dir ← huhDir
-  let keyPath := a.key.getD (dir / "id").toString
+  let keyPath := a.key.getD (dir / "id.private").toString
   let fail (msg : String) : IO UInt32 := do IO.eprintln s!"huh: {msg}"; return 255
+  let file ← try readKeyFile keyPath catch e => return ← fail (toString e)
   let private_ ← try FFI.filePrivate keyPath catch e => return ← fail (toString e)
   unless private_ do return ← fail s!"{keyPath} must be private to its owner"
-  let key ← try readPrivate keyPath catch e => return ← fail (toString e)
+  let key ← try
+      match file with
+      | .plain seed => IO.ofExcept ((keyPairOfSeed seed).mapError IO.userError)
+      | .encrypted f =>
+        unlockWith f (FFI.readPassphrase s!"Passphrase for {keyPath}: ")
+          (IO.eprintln s!"huh: {·}")
+    catch e => return ← fail (toString e)
   let tty ← FFI.isatty 0
   let pty ← if a.pty.getD (tty && a.cmd.isEmpty) then do
       let (rows, cols) ← if tty then FFI.ttyWinsize 0 else pure (24, 80)

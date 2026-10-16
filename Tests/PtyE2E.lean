@@ -32,7 +32,12 @@ def main (args : List String) : IO UInt32 := do
   let envp := #[s!"HOME={home}", "PATH=/usr/local/bin:/usr/bin:/bin", "TERM=xterm-huhtest"]
   -- the second session runs in the background so the test can learn its pid and SIGTERM it
   let cmd := s!"{huh} -p {port} 127.0.0.1; echo EXIT=$?; stty -a; " ++
-    s!"{huh} -t -p {port} 127.0.0.1 </dev/tty & echo PID=$!; wait $!; echo EXIT2=$?; stty -a"
+    s!"{huh} -t -p {port} 127.0.0.1 </dev/tty & echo PID=$!; wait $!; echo EXIT2=$?; stty -a; " ++
+    -- an encrypted client key, unlocked at the prompt, then a prompt left with Ctrl-C
+    s!"{huh} -i {home}/.huh/enc.private -p {port} 127.0.0.1 'echo UNLOCKED'; echo EXIT3=$?; " ++
+    -- the trap keeps sh going after Ctrl-C kills huh
+    s!"trap 'echo INT' INT; {huh} -i {home}/.huh/enc.private -p {port} 127.0.0.1 true; " ++
+    "echo EXIT4=$?; stty -a"
   let (pid, master) ← FFI.spawnPty "/bin/sh" #["sh", "-c", cmd] envp home 30 100
   let out ← IO.mkRef ByteArray.empty
   let _ ← IO.asTask (prio := .dedicated) (collect master out)
@@ -83,6 +88,17 @@ def main (args : List String) : IO UInt32 := do
   discard <| IO.Process.output { cmd := "kill", args := #["-TERM", pid2] }
   step "huh exits 143 on SIGTERM" "" "EXIT2=143"
   step "local terminal is restored after SIGTERM" "" " icanon"
+  step "huh asks for the passphrase" "" "Passphrase for "
+  step "a wrong passphrase is refused" "wrong\n" "wrong passphrase"
+  step "huh asks again" "" "Passphrase for "
+  let before ← mark.get
+  step "the right passphrase unlocks the key" "hunter2\n" "UNLOCKED"
+  step "the session with the encrypted key exits 0" "" "EXIT3=0"
+  if contains (text ((← out.get).extract before (← mark.get))) "hunter2" then
+    failures.modify (· + 1); IO.println "  FAIL  the passphrase was echoed"
+  step "huh asks for the passphrase again" "" "Passphrase for "
+  step "Ctrl-C at the prompt kills huh" "\x03" "EXIT4=130"
+  step "echo is back on after Ctrl-C at the prompt" "" " echo "
   let (_, _) ← FFI.wait pid
   let all ← out.get
   let after := text (all.extract (← mark.get) all.size)
