@@ -19,7 +19,7 @@ wait_for() { for _ in $(seq 100); do eval "$1" && return 0; sleep 0.1; done; ret
 "$bin/huh-keygen" -C client >/dev/null
 "$bin/huh-keygen" -f "$HOME/.huh/host_key" >/dev/null
 cp "$HOME/.huh/id.pub" "$HOME/.huh/authorized_keys"
-echo "127.0.0.1:$port $(cut -d' ' -f1,2 "$HOME/.huh/host_key.pub")" > "$HOME/.huh/known_hosts"
+"$bin/huh-keygen" -f "$HOME/.huh/host_key" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
 
 start_server() {
   "$bin/huhd" --listen "127.0.0.1:$port" 2>>"$work/server.log" &
