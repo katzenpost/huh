@@ -9,7 +9,7 @@ import LeanBench
 /-! # huh's own work per data message
 
 Each bench handles one full data message, `maxData` bytes, which is what `huh` sends per frame
-when piping a file. Cryptography is benchmarked in uproar and CryptWalker. Inputs are read from
+when piping a file. Cryptography is benchmarked in uproar and Cryptlib. Inputs are read from
 refs so the compiler cannot hoist the work out of the timed action. -/
 
 open Huh

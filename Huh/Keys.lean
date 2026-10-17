@@ -4,10 +4,10 @@ SPDX-License-Identifier: AGPL-3.0-only
 -/
 
 import Huh.Protocol
-import CryptWalker.Util.newhex
-import CryptWalker.Hash.Blake2s
-import CryptWalker.KDF.Argon2
-import CryptWalker.Cipher.ChaChaPoly
+import Cryptlib.Util.newhex
+import Cryptlib.Primitives.Hash.Blake2s
+import Cryptlib.Primitives.KDF.Argon2
+import Cryptlib.Primitives.Cipher.ChaChaPoly
 
 /-! # Key files
 
@@ -27,13 +27,13 @@ with a random 32-byte salt, both in hex. -/
 namespace Huh
 
 open Uproar
-open CryptWalker.Util.newhex (byteArrayToHex hexStringToByteArray)
+open Cryptlib.Util.newhex (byteArrayToHex hexStringToByteArray)
 
 def algorithm : String := "huh-mlkem768hx25519"
 
 def keyPairOfSeed (seed : ByteArray) : Except String KeyPair := do
   if seed.size != 32 then throw "a private key is 32 bytes"
-  (kem.ofSeed (CryptWalker.Util.Bytes.toVecN 32 seed)).mapError reprStr
+  (kem.ofSeed (Cryptlib.Util.Bytes.toVecN 32 seed)).mapError reprStr
 
 def publicLine (pub : ByteArray) (comment : String := "") : String :=
   s!"{algorithm} {byteArrayToHex pub}" ++ (if comment.isEmpty then "" else s!" {comment}")
@@ -45,7 +45,7 @@ def parsePublic (alg hex : String) : Option ByteArray := do
   return pub
 
 def fingerprint (pub : ByteArray) : String :=
-  let h := CryptWalker.Util.Bytes.ofVector (CryptWalker.Hash.Blake2s.hash pub)
+  let h := Cryptlib.Util.Bytes.ofVector (Cryptlib.Primitives.Hash.Blake2s.hash pub)
   "BLAKE2s:" ++ byteArrayToHex (h.extract 0 16)
 
 def fields (line : String) : List String :=
@@ -71,7 +71,7 @@ def parseKnownHosts (text : String) : List (String × ByteArray) :=
   (knownHostEntries text).map (·.2)
 
 def hostHash (salt : ByteArray) (hostId : String) : ByteArray :=
-  CryptWalker.Util.Bytes.ofVector (CryptWalker.Hash.Blake2s.hashKeyed salt hostId.toUTF8)
+  Cryptlib.Util.Bytes.ofVector (Cryptlib.Primitives.Hash.Blake2s.hashKeyed salt hostId.toUTF8)
 
 /-- `host:port` hashed under `salt`, as a known-hosts line writes it. -/
 def hashHost (salt : ByteArray) (hostId : String) : String :=
@@ -135,10 +135,10 @@ private def readLe32 (b : ByteArray) (o : Nat) : Nat :=
 /-- The ChaCha20-Poly1305 key for `pass`: Argon2id with a 32-byte tag. -/
 def passphraseKey (k : KdfParams) (salt : ByteArray) (pass : String) :
     Except String (Vector UInt8 32) := do
-  let tag ← CryptWalker.KDF.Argon2.hash
+  let tag ← Cryptlib.Primitives.KDF.Argon2.hash
     { variant := .id, parallelism := k.lanes, tagLength := 32, memoryKiB := k.memoryKiB,
       passes := k.passes } pass.toUTF8 salt
-  return CryptWalker.Util.Bytes.toVecN 32 tag
+  return Cryptlib.Util.Bytes.toVecN 32 tag
 
 /-- An encrypted key file for `seed`, with a 16-byte `salt` and 12-byte `nonce`. -/
 def encryptSeed (k : KdfParams) (salt nonce : ByteArray) (pass : String) (seed : ByteArray) :
@@ -146,8 +146,8 @@ def encryptSeed (k : KdfParams) (salt nonce : ByteArray) (pass : String) (seed :
   if salt.size != 16 || nonce.size != 12 then throw "the salt is 16 bytes and the nonce 12"
   let header := keyMagic ++ le32 k.memoryKiB ++ le32 k.passes ++ le32 k.lanes ++ salt ++ nonce
   let key ← passphraseKey k salt pass
-  return header ++ CryptWalker.Cipher.ChaChaPoly.encrypt key
-    (CryptWalker.Util.Bytes.toVecN 12 nonce) header seed
+  return header ++ Cryptlib.Primitives.Cipher.ChaChaPoly.encrypt key
+    (Cryptlib.Util.Bytes.toVecN 12 nonce) header seed
 
 /-- The seed in an encrypted key file. -/
 def decryptSeed (file : ByteArray) (pass : String) : Except String ByteArray := do
@@ -158,8 +158,8 @@ def decryptSeed (file : ByteArray) (pass : String) : Except String ByteArray := 
   unless kdfAllowed k do throw "the key file asks for too much memory or time to unlock"
   let header := file.extract 0 keyHeaderLen
   let key ← passphraseKey k (file.extract 20 36) pass
-  let some seed := CryptWalker.Cipher.ChaChaPoly.decrypt key
-      (CryptWalker.Util.Bytes.toVecN 12 (file.extract 36 48)) header
+  let some seed := Cryptlib.Primitives.Cipher.ChaChaPoly.decrypt key
+      (Cryptlib.Util.Bytes.toVecN 12 (file.extract 36 48)) header
       (file.extract keyHeaderLen file.size)
     | throw "wrong passphrase or damaged key file"
   return seed

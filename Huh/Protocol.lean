@@ -11,7 +11,7 @@ namespace Huh
 
 open Uproar
 
-def kem : KEMFn := ⟨CryptWalker.KEM.kemMLKEMHedged768X25519, "MLKEM768HedgedX25519"⟩
+def kem : KEMFn := ⟨Cryptlib.Primitives.KEM.kemMLKEMHedged768X25519, "MLKEM768HedgedX25519"⟩
 
 def protocol : Protocol := ⟨Patterns.pqXX, .kem kem kem, Suites.chaChaPoly, Suites.blake2s⟩
 
