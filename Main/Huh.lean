@@ -1,4 +1,5 @@
 import Huh.Client
+import Huh.Passphrase
 
 open Huh
 
@@ -32,7 +33,7 @@ def main (args : List String) : IO UInt32 := do
       match file with
       | .plain seed => IO.ofExcept ((keyPairOfSeed seed).mapError IO.userError)
       | .encrypted f =>
-        unlockWith f (FFI.readPassphrase s!"Passphrase for {keyPath}: ")
+        unlockWith f (readPassphrase s!"Passphrase for {keyPath}: ")
           (IO.eprintln s!"huh: {·}")
     catch e => return ← fail (toString e)
   let tty ← FFI.isatty 0

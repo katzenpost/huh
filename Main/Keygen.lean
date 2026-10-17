@@ -1,5 +1,5 @@
 import Huh.Keys
-import Huh.FFI
+import Huh.Passphrase
 
 open Huh
 
@@ -49,9 +49,9 @@ def printKnownHost (host : String) (keyfile : System.FilePath) : IO UInt32 := do
 /-- The new passphrase: `-N`, or asked for twice. Empty means none. -/
 def newPassphrase (given : Option String) : IO String := do
   if let some p := given then return p
-  let p ← FFI.readPassphrase "Enter passphrase (empty for none): "
+  let p ← readPassphrase "Enter passphrase (empty for none): "
   if p.isEmpty then return p
-  unless (← FFI.readPassphrase "Enter the same passphrase again: ") == p do
+  unless (← readPassphrase "Enter the same passphrase again: ") == p do
     throw (IO.userError "the passphrases don't match")
   return p
 
@@ -72,7 +72,7 @@ def changePassphrase (path : System.FilePath) (given : Option String) : IO UInt3
   let seed ← match ← readKeyFile path with
     | .plain seed => pure seed
     | .encrypted f =>
-      unlockSeedWith f (FFI.readPassphrase s!"Old passphrase for {path}: ") (IO.eprintln ·)
+      unlockSeedWith f (readPassphrase s!"Old passphrase for {path}: ") (IO.eprintln ·)
   let tmp : System.FilePath := path.toString ++ ".tmp"
   writePrivate tmp (← sealSeed (← newPassphrase given) seed)
   IO.FS.rename tmp path
