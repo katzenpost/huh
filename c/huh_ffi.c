@@ -286,6 +286,20 @@ LEAN_EXPORT lean_obj_res huh_isatty(uint32_t fd) {
   return lean_io_result_mk_ok(lean_box(isatty((int)fd) ? 1 : 0));
 }
 
+/* Open /dev/tty with echo off: `(fd, saved state)`, the state for huh_tty_restore. */
+LEAN_EXPORT lean_obj_res huh_tty_open_noecho(void) {
+  int fd = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+  if (fd < 0) return io_errno();
+  struct termios saved, quiet;
+  if (tcgetattr(fd, &saved) < 0) { close(fd); return io_errno(); }
+  quiet = saved;
+  quiet.c_lflag &= ~(tcflag_t)(ECHO | ECHONL);
+  if (tcsetattr(fd, TCSAFLUSH, &quiet) < 0) { close(fd); return io_errno(); }
+  lean_object *out = lean_alloc_sarray(1, sizeof(saved), sizeof(saved));
+  memcpy(lean_sarray_cptr(out), &saved, sizeof(saved));
+  return lean_io_result_mk_ok(pair(lean_box_uint32((uint32_t)fd), out));
+}
+
 /* (user name, home, shell) of the effective user. */
 LEAN_EXPORT lean_obj_res huh_getpw(void) {
   struct passwd *pw = getpwuid(geteuid());

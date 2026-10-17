@@ -35,6 +35,8 @@ opaque spawnPipes (path : @& String) (argv envp : @& Array String) (dir : @& Str
 /-- `(rows, cols)`. -/
 @[extern "huh_tty_winsize"] opaque ttyWinsize (fd : UInt32) : IO (UInt16 × UInt16)
 @[extern "huh_isatty"] opaque isatty (fd : UInt32) : IO Bool
+/-- `/dev/tty` with echo off: `(fd, saved state)`, the state for `ttyRestore`. -/
+@[extern "huh_tty_open_noecho"] opaque ttyOpenNoEcho : IO (UInt32 × ByteArray)
 
 /-- `(user, home, shell)` of the effective user. -/
 @[extern "huh_getpw"] opaque getpw : IO (String × String × String)

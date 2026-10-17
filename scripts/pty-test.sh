@@ -12,10 +12,12 @@ export HOME=$work/home
 export SHELL=/bin/sh
 mkdir -p "$HOME"
 
-"$bin/huh-keygen" -C client >/dev/null
-"$bin/huh-keygen" -f "$HOME/.huh/host_key" >/dev/null
+"$bin/huh-keygen" -C client -N "" >/dev/null
+"$bin/huh-keygen" --host >/dev/null
 cp "$HOME/.huh/id.pub" "$HOME/.huh/authorized_keys"
-"$bin/huh-keygen" -f "$HOME/.huh/host_key" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
+"$bin/huh-keygen" -f "$HOME/.huh/enc" -C encrypted -N hunter2 >/dev/null
+cat "$HOME/.huh/enc.pub" >> "$HOME/.huh/authorized_keys"
+"$bin/huh-keygen" -H "127.0.0.1:$port" > "$HOME/.huh/known_hosts"
 
 "$bin/huhd" --listen "127.0.0.1:$port" 2>"$work/server.log" &
 srv=$!
