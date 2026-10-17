@@ -5,7 +5,7 @@ over TCP using the Noise `pqXX` handshake with hybrid ML-KEM-768 + X25519, ChaCh
 and BLAKE2s (via [uproar](https://github.com/katzenpost/uproar)). Each side authenticates the
 other by its static public key, much as SSH does with keys only. A client's private key can be
 encrypted under a passphrase, stretched with Argon2id (via
-[CryptWalker](https://github.com/katzenpost/CryptWalker)).
+[Cryptlib](https://github.com/katzenpost/cryptlib)).
 
 ## Build
 

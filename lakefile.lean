@@ -8,8 +8,8 @@ require LeanBench from git "https://github.com/alok/LeanBench" @ "main"
 
 require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
 
--- Directly, for Argon2 (CryptWalker.KDF.Argon2), which uproar's pinned revision predates.
-require CryptWalker from git "https://github.com/katzenpost/CryptWalker.git" @ "main"
+-- Directly, for Argon2 (Cryptlib.Primitives.KDF.Argon2), which uproar's pinned revision predates.
+require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "main"
 
 @[default_target]
 lean_lib Huh

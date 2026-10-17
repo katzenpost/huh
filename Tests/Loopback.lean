@@ -8,7 +8,7 @@ namespace Tests.Loopback
 abbrev Pipe := Std.CloseableChannel.Sync ByteArray
 
 def keyOf (label : String) : IO KeyPair :=
-  IO.ofExcept ((keyPairOfSeed (CryptWalker.Util.Bytes.ofVector (CryptWalker.Hash.Blake2s.hash label.toUTF8))).mapError
+  IO.ofExcept ((keyPairOfSeed (Cryptlib.Util.Bytes.ofVector (Cryptlib.Primitives.Hash.Blake2s.hash label.toUTF8))).mapError
     IO.userError)
 
 /-- Runs `act` over the given pipes, closing its outgoing pipe when it finishes either way. -/
