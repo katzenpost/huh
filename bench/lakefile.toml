@@ -1,0 +1,28 @@
+name = "huh-bench"
+reservoir = false
+version = "0.1.0"
+packagesDir = "../.lake/packages"
+defaultTargets = ["huh-bench"]
+
+[leanOptions]
+pp.unicode.fun = true
+autoImplicit = false
+relaxedAutoImplicit = false
+
+[[require]]
+name = "LeanBench"
+git = "https://github.com/alok/LeanBench"
+rev = "250d2a892bf8c91ec3ae5de8517793e18379f97b"
+
+# Declared last so that huh's pins, Mathlib's included, take precedence over LeanBench's.
+[[require]]
+name = "huh"
+path = "../"
+
+[[lean_lib]]
+name = "HuhBench"
+globs = ["HuhBench.+"]
+
+[[lean_exe]]
+name = "huh-bench"
+root = "HuhBench.Main"

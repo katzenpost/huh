@@ -2,21 +2,21 @@ import Lake
 open Lake DSL System
 
 package huh where
+  version := v!"0.1.0"
+  description := "Secure remote shell based on PQ Noise"
+  keywords := #["ssh", "remote-shell", "noise", "post-quantum", "cryptography"]
+  license := "AGPL-3.0-only"
   leanOptions := #[⟨`pp.unicode.fun, true⟩, ⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
-require LeanBench from git "https://github.com/alok/LeanBench" @ "main"
-
-require uproar from git "https://github.com/katzenpost/uproar.git" @ "noise"
+require uproar from git "https://github.com/katzenpost/uproar.git" @ "3d107803c9685c250553a2ee05119d517d507572"
 
 -- Directly, for Argon2 (Cryptlib.Primitives.KDF.Argon2), which uproar's pinned revision predates.
-require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "main"
+require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "6f651738d26db5ac18dd5670bf501cfc63723175"
 
 @[default_target]
 lean_lib Huh
 
 lean_lib Tests
-
-lean_lib Bench
 
 target huh_ffi.o pkg : FilePath := do
   let src ← inputTextFile (pkg.dir / "c" / "huh_ffi.c")
@@ -40,6 +40,3 @@ lean_exe «huh-test» where
 
 lean_exe «huh-pty-test» where
   root := `Tests.PtyE2E
-
-lean_exe «huh-bench» where
-  root := `Bench.Main
