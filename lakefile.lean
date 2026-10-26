@@ -2,16 +2,16 @@ import Lake
 open Lake DSL System
 
 package huh where
-  version := v!"0.1.0"
+  version := v!"0.2.0"
   description := "Secure remote shell based on PQ Noise"
   keywords := #["ssh", "remote-shell", "noise", "post-quantum", "cryptography"]
   license := "AGPL-3.0-only"
   leanOptions := #[⟨`pp.unicode.fun, true⟩, ⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
-require uproar from git "https://github.com/katzenpost/uproar.git" @ "3d107803c9685c250553a2ee05119d517d507572"
+require uproar from git "https://github.com/katzenpost/uproar.git" @ "2fcd8cee8d843b75645d6766f207d5d4f6613d4a"
 
 -- Directly, for Argon2 (Cryptlib.Primitives.KDF.Argon2), which uproar's pinned revision predates.
-require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "6f651738d26db5ac18dd5670bf501cfc63723175"
+require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "v0.2.0"
 
 @[default_target]
 lean_lib Huh

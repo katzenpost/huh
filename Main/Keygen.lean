@@ -47,8 +47,8 @@ def printKnownHost (host : String) (keyfile : System.FilePath) : IO UInt32 := do
   return 0
 
 /-- The new passphrase: `-N`, or asked for twice. Empty means none. -/
-def newPassphrase (given : Option String) : IO String := do
-  if let some p := given then return p
+def newPassphrase (supplied : Option String) : IO String := do
+  if let some p := supplied then return p
   let p ← readPassphrase "Enter passphrase (empty for none): "
   if p.isEmpty then return p
   unless (← readPassphrase "Enter the same passphrase again: ") == p do
@@ -68,13 +68,13 @@ def writePrivate (path : System.FilePath) (bytes : ByteArray) : IO Unit := do
   IO.FS.writeBinFile path bytes
 
 /-- `-p`: re-encrypt a client key under a new passphrase, or none. -/
-def changePassphrase (path : System.FilePath) (given : Option String) : IO UInt32 := do
+def changePassphrase (path : System.FilePath) (supplied : Option String) : IO UInt32 := do
   let seed ← match ← readKeyFile path with
     | .plain seed => pure seed
     | .encrypted f =>
       unlockSeedWith f (readPassphrase s!"Old passphrase for {path}: ") (IO.eprintln ·)
   let tmp : System.FilePath := path.toString ++ ".tmp"
-  writePrivate tmp (← sealSeed (← newPassphrase given) seed)
+  writePrivate tmp (← sealSeed (← newPassphrase supplied) seed)
   IO.FS.rename tmp path
   IO.println s!"{path}: passphrase changed"
   return 0
@@ -85,10 +85,10 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln "huh-keygen: host keys are never encrypted"; IO.eprintln usage; return 2
   let dir ← huhDir
   let defaultName := if a.hostKey || a.host.isSome then "host_key" else "id"
-  let given := a.path.map System.FilePath.mk
+  let supplied := a.path.map System.FilePath.mk
   if let some host := a.host then
-    return ← printKnownHost host (given.getD (dir / defaultName))
-  let path := privatePath (given.getD (dir / defaultName))
+    return ← printKnownHost host (supplied.getD (dir / defaultName))
+  let path := privatePath (supplied.getD (dir / defaultName))
   try
     if a.change then return ← changePassphrase path a.pass
     if a.path.isNone then
