@@ -4,7 +4,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 -/
 
 import Huh.Protocol
-import Cryptlib.Util.newhex
+import Cryptlib.Util.HexBytes
 import Cryptlib.Primitives.Hash.Blake2s
 import Cryptlib.Primitives.KDF.Argon2
 import Cryptlib.Primitives.Cipher.ChaChaPoly
@@ -27,7 +27,7 @@ with a random 32-byte salt, both in hex. -/
 namespace Huh
 
 open Uproar
-open Cryptlib.Util.newhex (byteArrayToHex hexStringToByteArray)
+open Cryptlib.Util.HexBytes (byteArrayToHex hexStringToByteArray)
 
 def algorithm : String := "huh-mlkem768hx25519"
 
