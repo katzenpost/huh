@@ -8,7 +8,7 @@ package huh where
   license := "AGPL-3.0-only"
   leanOptions := #[⟨`pp.unicode.fun, true⟩, ⟨`autoImplicit, false⟩, ⟨`relaxedAutoImplicit, false⟩]
 
-require uproar from git "https://github.com/katzenpost/uproar.git" @ "2fcd8cee8d843b75645d6766f207d5d4f6613d4a"
+require uproar from git "https://github.com/katzenpost/uproar.git" @ "c9f471ecbeb6c80809aafe50c7d3bce6e4a8791c"
 
 -- Directly, for Argon2 (Cryptlib.Primitives.KDF.Argon2), and at lean_tls's revision for ML-DSA-65.
 require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "afb26ca42f7e648f6b69b6559db17bfbf83b7f6a"
