@@ -34,8 +34,9 @@ def sendWindow : Nat := 1024 * 1024
 /-- Received bytes a session may leave unread before the stream's flow control holds the peer. -/
 def recvWindow : Nat := 1024 * 1024
 
-/-- PINGs after this long without sending, well inside the 30-second idle timeout. -/
-def keepAliveMs : Nat := 10000
+/-- PINGs after this long without sending. Besides keeping the connection inside the 30-second
+idle timeout, a PING to a server whose process is gone draws the port unreachable that ends it. -/
+def keepAliveMs : Nat := 5000
 
 def quicConfig : LeanQUIC.Config :=
   { keepAlive := keepAliveMs, maxStreamsBidi := 1, maxStreamsUni := 0 }
@@ -58,11 +59,13 @@ structure Link where
   done : IO.Promise Unit
   /-- The connection's address, as `host:port`. -/
   peer : String
+  /-- Why the connection was lost, when we gave up on it. -/
+  lost : IO.Ref (Option String)
 
 def Link.new (kick : CloseableChannel Unit) (peer : String) : IO Link :=
   return { out := ← CloseableChannel.new (some 64), inp := ← CloseableChannel.new,
            unread := ← IO.mkRef 0, pending := ← IO.mkRef .empty, abort := ← IO.mkRef false,
-           kick, done := ← IO.Promise.new, peer }
+           kick, done := ← IO.Promise.new, peer, lost := ← IO.mkRef none }
 
 def Link.nudge (l : Link) : BaseIO Unit := discard <| l.kick.trySend ()
 
@@ -70,13 +73,14 @@ def Link.nudge (l : Link) : BaseIO Unit := discard <| l.kick.trySend ()
 def Link.send (l : Link) (frame : ByteArray) : IO Unit := do
   let t ← l.out.send (← encodeFrame frame)
   l.nudge
-  if let Except.error _ ← IO.wait t then throw (IO.userError "connection closed")
+  if let Except.error _ ← IO.wait t then throw (IO.userError ((← l.lost.get).getD "connection closed"))
 
 /-- Up to `n` bytes, taking the next chunk with `next`; empty at the end of the stream. -/
 def Link.readWith (l : Link) (next : IO (Option ByteArray)) (n : USize) : IO ByteArray := do
   let mut buf ← l.pending.get
   if buf.isEmpty then
-    let some chunk ← next | return .empty
+    let some chunk ← next
+      | if let some r ← l.lost.get then throw (IO.userError r) else return .empty
     l.unread.modify (· - chunk.size)
     l.nudge
     buf := chunk
@@ -122,15 +126,19 @@ structure Peer where
   finished : Bool := false
   /-- A server closes an established connection that has not opened its stream by then. -/
   streamDeadline : Option Nat := none
+  /-- After the peer's port was reported unreachable: when to give up on it unless an authenticated
+  packet has moved its idle deadline from the one recorded. -/
+  unreachable : Option (Nat × Option Nat) := none
 
 inductive Event where
   | datagram (data : ByteArray) (from_ : Option SocketAddress)
   | timeout
   | kick
+  /-- An ICMP port unreachable for the connected socket. -/
+  | refused
 
-/-- A datagram, the earliest deadline, or a nudge from a session. A failed receive, such as an
-ICMP port unreachable on a connected socket, counts as a nudge: QUIC ignores ICMP and relies on
-its own timers. -/
+/-- A datagram, the earliest deadline, a nudge from a session, or a port unreachable. Any other
+failed receive counts as a nudge. -/
 def wait (sock : UDP.Socket) (kick : CloseableChannel Unit) (deadline : Option Nat) : Async Event := do
   let now ← nowUs
   let ms := match deadline with
@@ -143,7 +151,9 @@ def wait (sock : UDP.Socket) (kick : CloseableChannel Unit) (deadline : Option N
         .case (sock.recvSelector 65536) fun (d, a) => pure (Event.datagram d a),
         .case sleep.selector fun _ => pure Event.timeout,
         .case kick.recvSelector fun _ => pure Event.kick]
-    catch _ => pure Event.kick
+    catch
+      | .noSuchThing _ 111 _ => pure Event.refused
+      | _ => pure Event.kick
   sleep.stop
   pure ev
 
@@ -179,28 +189,42 @@ def service (p : Peer) (isServer : Bool) : IO Peer := do
     c := c.close (← nowUs)
   return { p with udp := { p.udp with conn := c }, finished }
 
-/-- A connection is gone: unblock its session. -/
-def Link.hangUp (l : Link) : IO Unit := do
+/-- A connection is gone, for `reason` if we gave up on it: unblock its session. -/
+def Link.hangUp (l : Link) (reason : Option String := none) : IO Unit := do
+  l.lost.set reason
   try l.inp.close catch _ => pure ()
   try l.out.close catch _ => pure ()
   l.done.resolve ()
 
+/-- The peer's port was reported unreachable. ICMP can be forged, so this only starts a check: a
+PING, and the peer is gone if nothing authenticated arrives within three PTOs. -/
+def suspect (p : Peer) (now : Nat) : Peer :=
+  if p.unreachable.isSome then p else
+  let c := p.udp.conn
+  let c := if c.isEstablished then { c with pendingControl := c.pendingControl.push .ping } else c
+  let wait := max 1000000 (3 * c.recovery.ptoDuration .application)
+  { p with unreachable := some (now + wait, c.idleDeadline), udp := { p.udp with conn := c } }
+
 /-- Send everything a connection has to send now. -/
 def flush (sock : UDP.Socket) (p : Peer) (dest : Option SocketAddress) : Async Peer := do
   let mut c := p.udp.conn
+  let mut refused := false
   for _ in [0:4096] do
     let (c', d) := c.poll (← nowUs)
     c := c'
     match d with
-    | some d => try sock.send d dest catch _ => pure ()
+    | some d => try sock.send d dest catch | .noSuchThing _ 111 _ => refused := true | _ => pure ()
     | none => break
-  pure { p with udp := { p.udp with conn := c } }
+  let p := { p with udp := { p.udp with conn := c } }
+  if refused then return suspect p (← nowUs)
+  pure p
 
 /-- Why a connection closed, from `Conn.closeReason`: whether we closed it, the error code, and the
 reason. -/
 def closeMessage : Option (Bool × Nat × String) → String
   | some (true, 0x100 + 42, _) => "the server's certificate does not match its QUIC pin in known_hosts"
   | some (true, _, "idle timeout") => "no answer"
+  | some (true, _, "unreachable") => "nothing is listening there"
   | some (true, code, r) => s!"{r} (error {code})"
   | some (false, code, r) => s!"closed by the server: {r} (error {code})"
   | none => "connection closed"
@@ -242,7 +266,10 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
     for (i, p) in peers.toList do
       let p ← (service p serving.isSome : IO _)
       if p.udp.conn.isClosed then
-        if let some l := p.link then (l.hangUp : IO _)
+        let reason := match p.udp.conn.closeReason with
+          | some (true, code, r) => if r.isEmpty then none else some (closeMessage (some (true, code, r)))
+          | _ => none
+        if let some l := p.link then (l.hangUp reason : IO _)
         peers := peers.erase i
         ps := { ps with conns := ps.conns.erase i, byCid := p.udp.cids.foldl (·.erase ·) ps.byCid }
         if let some (_, ready) := initial then ready.resolve (.error (closeMessage p.udp.conn.closeReason))
@@ -255,11 +282,10 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
       peers := peers.insert i p
       ps := ps.put i p.udp
     if peers.isEmpty && (serving.isNone || (← stop.get)) then return
+    let earliest : Option Nat → Option Nat → Option Nat
+      | some a, some b => some (min a b) | none, b => b | a, none => a
     let deadline := peers.fold (fun acc _ p =>
-      let d := match p.udp.conn.nextTimeout, p.streamDeadline with
-        | some a, some b => some (min a b) | none, b => b | a, none => a
-      match acc, d with
-      | some a, some b => some (min a b) | none, b => b | a, none => a) none
+      earliest acc (earliest p.udp.conn.nextTimeout (earliest p.streamDeadline (p.unreachable.map (·.1))))) none
     let ev ← wait sock kick deadline
     let now ← nowUs
     match ev with
@@ -271,6 +297,14 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
         if p.streamDeadline.any (· ≤ now) then
           let c := (peers[i]?.map (·.udp.conn)).getD p.udp.conn
           peers := peers.insert i { p with streamDeadline := none, udp := { p.udp with conn := c.close now } }
+        if let some (d, idle) := p.unreachable then
+          if d ≤ now then
+            let p := peers[i]?.getD p
+            let c := p.udp.conn
+            let c := if c.idleDeadline == idle && !c.isClosed then
+                { c with phase := .closed, closeReason := some (true, 0, "unreachable") } else c
+            peers := peers.insert i { p with unreachable := none, udp := { p.udp with conn := c } }
+    | .refused => for (i, p) in peers.toList do peers := peers.insert i (suspect p now)
     | .datagram _ none => pure ()
     | .datagram d (some addr) =>
       let some (hdr, _) := parseHeader d 0 cidLength | return ← loop ps peers ep
