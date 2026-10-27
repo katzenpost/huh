@@ -28,6 +28,9 @@ def main (args : List String) : IO UInt32 := do
   let dir ← huhDir
   let keyPath := a.key.getD (dir / "id.private").toString
   let fail (msg : String) : IO UInt32 := do IO.eprintln s!"huh: {msg}"; return 255
+  unless ← System.FilePath.pathExists keyPath do
+    return ← fail (if a.key.isSome then s!"no key at {keyPath}"
+      else s!"no key at {keyPath}; create one with huh-keygen")
   let file ← try readKeyFile keyPath catch e => return ← fail (toString e)
   let private_ ← try FFI.filePrivate keyPath catch e => return ← fail (toString e)
   unless private_ do return ← fail s!"{keyPath} must be private to its owner"

@@ -125,16 +125,38 @@ inductive Transport where
   | quic (pins : List ByteArray)
   | tcp
 
-/-- Run a session with `host`, in raw mode when a PTY is requested. SIGTERM ends it early with
-exit code 143, after the terminal is restored. -/
+/-- How far a connection got before it failed. -/
+inductive Stage where
+  | connecting | verifyingHost | authenticating | established
+  deriving BEq, Repr
+
+/-- What to tell the user when the connection to `target` fails at `stage` with error `e`. -/
+def failureMessage (stage : Stage) (target keyFp e : String) : String :=
+  match stage with
+  | .connecting => s!"could not connect to {target}: {e}"
+  | .verifyingHost => if e == "peer key rejected" then s!"not connecting to {target}"
+    else s!"handshake with {target} failed: {e}"
+  | .authenticating =>
+    s!"{target} ended the handshake after receiving our key {keyFp}; is it in the server's authorized_keys? ({e})"
+  | .established => s!"connection to {target} lost: {e}"
+
+/-- Run a session with `host` over `transport`, in raw mode when a PTY is requested. -/
 def run (cfg : Config) (transport : Transport) (host : String) (port : UInt16) : IO UInt32 := do
   FFI.ignoreSigpipe
   let term ← (← Std.Async.Signal.Waiter.mk .sigterm false).wait
+  let stage ← IO.mkRef Stage.connecting
   let saved ← IO.mkRef none
-  let raw := if cfg.pty.isSome then do saved.set (some (← FFI.ttyRaw 0)) else pure ()
+  let established := do
+    stage.set .established
+    if cfg.pty.isSome then saved.set (some (← FFI.ttyRaw 0))
   let restore := do if let some s ← saved.get then FFI.ttyRestore 0 s
+  let verifyHost pub := do
+    let ok ← cfg.verifyHost pub
+    if ok then stage.set .authenticating
+    return ok
   let close ← IO.mkRef (pure () : IO Unit)
   let hangup := do try (← close.get) catch _ => pure ()
+  let target := s!"{host}:{port}"
   try
     let conversation ← IO.asTask (prio := .dedicated) do
       let frames ← match transport with
@@ -146,7 +168,11 @@ def run (cfg : Config) (transport : Transport) (host : String) (port : UInt16) :
           let s ← Net.dial host port
           close.set s.shutdown.block
           pure (Net.frames s)
-      session cfg frames (← realTerminal) raw
+      let frames : Frames := { frames with recv := do
+        let f ← frames.recv
+        if f.isSome && (← stage.get) == .connecting then stage.set .verifyingHost
+        return f }
+      session { cfg with verifyHost } frames (← realTerminal) established
     let terminated := (ExceptT.run term).map fun _ => .ok (128 + signalNumber "TERM")
     let code ← IO.ofExcept (← IO.waitAny [conversation, terminated])
     restore
@@ -155,7 +181,7 @@ def run (cfg : Config) (transport : Transport) (host : String) (port : UInt16) :
   catch e =>
     restore
     hangup
-    IO.eprintln s!"huh: {e}"
+    IO.eprintln s!"huh: {failureMessage (← stage.get) target (fingerprint cfg.key.pub) (toString e)}"
     return 255
 
 end Huh.Client

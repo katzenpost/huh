@@ -196,6 +196,15 @@ def flush (sock : UDP.Socket) (p : Peer) (dest : Option SocketAddress) : Async P
     | none => break
   pure { p with udp := { p.udp with conn := c } }
 
+/-- Why a connection closed, from `Conn.closeReason`: whether we closed it, the error code, and the
+reason. -/
+def closeMessage : Option (Bool × Nat × String) → String
+  | some (true, 0x100 + 42, _) => "the server's certificate does not match its QUIC pin in known_hosts"
+  | some (true, _, "idle timeout") => "no answer"
+  | some (true, code, r) => s!"{r} (error {code})"
+  | some (false, code, r) => s!"closed by the server: {r} (error {code})"
+  | none => "connection closed"
+
 /-- What the endpoint does as a server: accept connections under the ML-DSA-65 key seeded by
 `signingKey`, its certificate renewed every epoch, and hand each session to `onSession`. -/
 structure Serving where
@@ -236,7 +245,7 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
         if let some l := p.link then (l.hangUp : IO _)
         peers := peers.erase i
         ps := { ps with conns := ps.conns.erase i, byCid := p.udp.cids.foldl (·.erase ·) ps.byCid }
-        if let some (_, ready) := initial then ready.resolve (.error s!"connection closed: {reprStr p.udp.conn.closeReason}")
+        if let some (_, ready) := initial then ready.resolve (.error (closeMessage p.udp.conn.closeReason))
         continue
       let dest := if serving.isSome then
         some ((p.udp.addrs.find? (·.1 == p.udp.conn.peerAddr)).map (·.2) |>.getD p.udp.addr) else none
@@ -344,7 +353,8 @@ def connect (addr : SocketAddress) (pins : List ByteArray) : IO Link := do
 
 /-- Connect to the first address of `host` that answers. -/
 def dial (host : String) (port : UInt16) (pins : List ByteArray) : IO Link := do
-  let addrs ← (DNS.getAddrInfo host (toString port)).block
+  -- getaddrinfo lists an address once per socket type
+  let addrs := (← (DNS.getAddrInfo host (toString port)).block).toList.eraseDups
   let mut err := IO.userError s!"{host}: no addresses"
   for a in addrs do
     let addr : SocketAddress := match a with
