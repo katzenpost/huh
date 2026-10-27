@@ -72,6 +72,18 @@ def run : IO Nat := do
     "wrong pin refused, and said so"
   srv.stop
 
+  -- a port nobody listens on fails at once, not at the idle timeout
+  let free ← do
+    let s ← Std.Async.UDP.Socket.mk
+    s.bind loopback
+    pure (← s.getSockName).port
+  let start ← IO.monoMsNow
+  let r ← (Huh.Quic.dial "127.0.0.1" free [pin]).toBaseIO
+  let waited := (← IO.monoMsNow) - start
+  t.expect (match r with | .error e => (toString e).endsWith (Huh.Quic.closeMessage (some (true, 0, "unreachable"))) | _ => false)
+    s!"nothing listening: {match r with | .error e => toString e | _ => "connected"}"
+  t.expect (waited < 5000) s!"nothing listening, found in {waited} ms"
+
   -- whole sessions
   let ck ← Tests.Loopback.keyOf "client"
   let sk ← Tests.Loopback.keyOf "server"

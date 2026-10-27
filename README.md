@@ -179,7 +179,9 @@ data. With a terminal:
 - the remote command's exit code
 - 128 + the signal number if it was killed by a signal
 - 255 if the connection failed, or the key's passphrase was wrong three times. Over QUIC, a server
-  that vanishes without closing the connection is noticed after 30 seconds of silence.
+  whose process dies is noticed within about 6 seconds, when its host answers `huh`'s next packet
+  with a port unreachable that a PING then confirms; a server whose host or network vanishes is
+  noticed after 30 seconds of silence.
 - 143 if `huh` itself got SIGTERM; your terminal is restored first and the remote side is hung up
 
 ### Known hosts
