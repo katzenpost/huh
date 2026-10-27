@@ -67,7 +67,9 @@ def run : IO Nat := do
   l.close
 
   -- the client accepts no other identity
-  t.throws "wrong pin refused" (Huh.Quic.connect addr [QuicId.pin (ByteArray.mk (Array.replicate 32 6))])
+  let r ← (Huh.Quic.connect addr [QuicId.pin (ByteArray.mk (Array.replicate 32 6))]).toBaseIO
+  t.expect (match r with | .error e => toString e == Huh.Quic.closeMessage (some (true, 298, "")) | _ => false)
+    "wrong pin refused, and said so"
   srv.stop
 
   -- whole sessions

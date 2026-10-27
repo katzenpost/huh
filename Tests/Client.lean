@@ -74,6 +74,15 @@ def run : IO Nat := do
   t.expect (!r.toBool) "reader rejects client messages"
   let (r, _, _) ← readerRun [.exit (.signal (bytes "INT"))]
   t.expect (r.toOption == some 130) "reader exit by signal"
+
+  -- failureMessage
+  let msg (st : Stage) (e : String) := failureMessage st "h:1" "FP" e
+  t.expect (msg .connecting "refused" == "could not connect to h:1: refused") "failure: connecting"
+  t.expect (msg .verifyingHost "peer key rejected" == "not connecting to h:1") "failure: host rejected"
+  t.expect (msg .verifyingHost "bad" == "handshake with h:1 failed: bad") "failure: handshake"
+  t.expect (((msg .authenticating "connection closed during handshake").splitOn "authorized_keys").length > 1)
+    "failure: client key rejected"
+  t.expect (msg .established "x" == "connection to h:1 lost: x") "failure: established"
   t.finish
 
 end Tests.Client
