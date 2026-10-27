@@ -12,10 +12,10 @@ import Std.Sync.Channel
 
 /-! # Frames over QUIC
 
-A session is one bidirectional QUIC stream carrying the same frames as over TCP. One task per
-endpoint owns the UDP socket and every connection on it: it waits for a datagram, a timer or a
-nudge from a session, then moves stream data between the connections and the sessions' channels
-and sends what the connections have to send.
+A session is one bidirectional QUIC stream carrying the same frames as over TCP. An endpoint owns
+the UDP socket and every connection on it, with one task for each direction: one receives
+datagrams into the connections, the other moves stream data between the connections and the
+sessions' channels and sends what the connections have to send.
 
 The server authenticates with ML-DSA-65 under its derived QUIC identity, and the client accepts it
 only under a pin from known-hosts. Clients are authenticated by the Noise handshake inside. -/
@@ -130,33 +130,6 @@ structure Peer where
   packet has moved its idle deadline from the one recorded. -/
   unreachable : Option (Nat × Option Nat) := none
 
-inductive Event where
-  | datagram (data : ByteArray) (from_ : Option SocketAddress)
-  | timeout
-  | kick
-  /-- An ICMP port unreachable for the connected socket. -/
-  | refused
-
-/-- A datagram, the earliest deadline, a nudge from a session, or a port unreachable. Any other
-failed receive counts as a nudge. -/
-def wait (sock : UDP.Socket) (kick : CloseableChannel Unit) (deadline : Option Nat) : Async Event := do
-  let now ← nowUs
-  let ms := match deadline with
-    | some d => if d ≤ now then 0 else (d - now + 999) / 1000
-    | none => 1000
-  if ms == 0 then return .timeout
-  let sleep ← Sleep.mk (Std.Time.Millisecond.Offset.ofNat ms)
-  let ev ← try
-      Selectable.one #[
-        .case (sock.recvSelector 65536) fun (d, a) => pure (Event.datagram d a),
-        .case sleep.selector fun _ => pure Event.timeout,
-        .case kick.recvSelector fun _ => pure Event.kick]
-    catch
-      | .noSuchThing _ 111 _ => pure Event.refused
-      | _ => pure Event.kick
-  sleep.stop
-  pure ev
-
 def unacked (c : Conn) (id : Nat) : Nat :=
   match c.streams[id]? with
   | some s => s.send.written - s.send.ackedTo
@@ -205,19 +178,44 @@ def suspect (p : Peer) (now : Nat) : Peer :=
   let wait := max 1000000 (3 * c.recovery.ptoDuration .application)
   { p with unreachable := some (now + wait, c.idleDeadline), udp := { p.udp with conn := c } }
 
-/-- Send everything a connection has to send now. -/
-def flush (sock : UDP.Socket) (p : Peer) (dest : Option SocketAddress) : Async Peer := do
+/-- Act on whichever of a connection's deadlines have passed. -/
+def expire (p : Peer) (now : Nat) : Peer := Id.run do
+  let mut p := p
+  if p.udp.conn.nextTimeout.any (· ≤ now) then
+    p := { p with udp := { p.udp with conn := p.udp.conn.onTimeout now } }
+  if p.streamDeadline.any (· ≤ now) then
+    p := { p with streamDeadline := none, udp := { p.udp with conn := p.udp.conn.close now } }
+  if let some (d, idle) := p.unreachable then
+    if d ≤ now then
+      let c := p.udp.conn
+      let c := if c.idleDeadline == idle && !c.isClosed then
+          { c with phase := .closed, closeReason := some (true, 0, "unreachable") } else c
+      p := { p with unreachable := none, udp := { p.udp with conn := c } }
+  return p
+
+/-- Take everything a connection has to send now. -/
+def drain (p : Peer) : IO (Peer × Array ByteArray) := do
   let mut c := p.udp.conn
-  let mut refused := false
+  let mut out := #[]
   for _ in [0:4096] do
     let (c', d) := c.poll (← nowUs)
     c := c'
     match d with
-    | some d => try sock.send d dest catch | .noSuchThing _ 111 _ => refused := true | _ => pure ()
+    | some d => out := out.push d
     | none => break
-  let p := { p with udp := { p.udp with conn := c } }
-  if refused then return suspect p (← nowUs)
-  pure p
+  return ({ p with udp := { p.udp with conn := c } }, out)
+
+/-- Send `ds`, starting every send before waiting for any; whether the peer's port was reported
+unreachable. -/
+def sendAll (sock : UDP.Socket) (ds : Array ByteArray) (dest : Option SocketAddress) : IO Bool := do
+  let mut sends := #[]
+  let mut refused := false
+  for d in ds do
+    try sends := sends.push (← sock.native.send #[d] dest)
+    catch | .noSuchThing _ 111 _ => refused := true | _ => pure ()
+  for r in sends do
+    if let some (.error (.noSuchThing _ 111 _)) ← IO.wait r.result? then refused := true
+  return refused
 
 /-- Why a connection closed, from `Conn.closeReason`: whether we closed it, the error code, and the
 reason. -/
@@ -241,8 +239,32 @@ def currentEpoch : IO Nat := do
   let unix := (← Std.Time.Timestamp.now).toSecondsSinceUnixEpoch.val.toNat
   return (unix - epochGenesis) / epochPeriod
 
+/-- An endpoint's connections, shared by its two tasks. -/
+structure State where
+  ps : Peers := {}
+  peers : Std.HashMap Nat Peer := {}
+  ep : Option (Endpoint.Config × Nat) := none
+
+/-- Wait for a nudge, or until `deadline`. -/
+def idle (kick : CloseableChannel Unit) (deadline : Option Nat) : Async Unit := do
+  let now ← nowUs
+  let ms := match deadline with
+    | some d => if d ≤ now then 0 else (d - now + 999) / 1000
+    | none => 1000
+  if ms == 0 then return
+  let sleep ← Sleep.mk (Std.Time.Millisecond.Offset.ofNat ms)
+  Selectable.one #[
+    .case kick.recvSelector fun _ => pure (),
+    .case sleep.selector fun _ => pure ()]
+  sleep.stop
+
 /-- Run the endpoint until `stop` is set and every connection is gone. A client endpoint starts
-with its one connection, and resolves `ready` when its stream is open. -/
+with its one connection, and resolves `ready` when its stream is open.
+
+One task receives: it hands each datagram to its connection, or to the server to start one. The
+other sends: it acts on deadlines, moves stream data between the connections and their sessions,
+and sends what the connections have to send, waiting for a nudge from the receiving task or a
+session when there is nothing to do. -/
 partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Option Serving)
     (initial : Option (Peer × IO.Promise (Except String Link))) (stop : IO.Ref Bool) : IO Unit := do
   let resetKey ← randomBytes 32
@@ -255,79 +277,41 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
                               certificate := cert } }, ← currentEpoch)
     | none => pure none
   let peerName (a : SocketAddress) : String := toString a
-  -- Every session's link, so that none is left waiting if the loop fails.
+  let nudge : BaseIO Unit := discard <| kick.trySend ()
+  -- Every session's link, so that none is left waiting if the endpoint fails.
   let links ← IO.mkRef (#[] : Array Link)
-  let rec loop (ps : Peers) (peers : Std.HashMap Nat Peer) (ep : Option (Endpoint.Config × Nat)) :
-      Async Unit := do
-    let mut peers := peers
-    let mut ps := ps
-    let mut ep := ep
-    -- Service and send, and drop closed connections.
-    for (i, p) in peers.toList do
-      let p ← (service p serving.isSome : IO _)
-      if p.udp.conn.isClosed then
-        let reason := match p.udp.conn.closeReason with
-          | some (true, code, r) => if r.isEmpty then none else some (closeMessage (some (true, code, r)))
-          | _ => none
-        if let some l := p.link then (l.hangUp reason : IO _)
-        peers := peers.erase i
-        ps := { ps with conns := ps.conns.erase i, byCid := p.udp.cids.foldl (·.erase ·) ps.byCid }
-        if let some (_, ready) := initial then ready.resolve (.error (closeMessage p.udp.conn.closeReason))
-        continue
-      let dest := if serving.isSome then
-        some ((p.udp.addrs.find? (·.1 == p.udp.conn.peerAddr)).map (·.2) |>.getD p.udp.addr) else none
-      let p ← flush sock p dest
-      if let some l := p.link then
-        if ← (l.abort.get : IO _) then l.done.resolve ()
-      peers := peers.insert i p
-      ps := ps.put i p.udp
-    if peers.isEmpty && (serving.isNone || (← stop.get)) then return
-    let earliest : Option Nat → Option Nat → Option Nat
-      | some a, some b => some (min a b) | none, b => b | a, none => a
-    let deadline := peers.fold (fun acc _ p =>
-      earliest acc (earliest p.udp.conn.nextTimeout (earliest p.streamDeadline (p.unreachable.map (·.1))))) none
-    let ev ← wait sock kick deadline
+  let s : State := { ep := ← mkEndpoint serving }
+  let state ← Std.Mutex.new <| match initial with
+    | some (p, _) => { s with ps := { ({} : Peers).put 0 p.udp with next := 1 }, peers := ({} : Std.HashMap Nat Peer).insert 0 p }
+    | none => s
+  -- A datagram for a connection, or one that may start a new one.
+  let receive (s : State) (d : ByteArray) (addr : SocketAddress) : IO State := do
     let now ← nowUs
-    match ev with
-    | .kick => repeat if (← (kick.tryRecv : IO _)).isNone then break
-    | .timeout =>
-      for (i, p) in peers.toList do
-        if p.udp.conn.nextTimeout.any (· ≤ now) then
-          peers := peers.insert i { p with udp := { p.udp with conn := p.udp.conn.onTimeout now } }
-        if p.streamDeadline.any (· ≤ now) then
-          let c := (peers[i]?.map (·.udp.conn)).getD p.udp.conn
-          peers := peers.insert i { p with streamDeadline := none, udp := { p.udp with conn := c.close now } }
-        if let some (d, idle) := p.unreachable then
-          if d ≤ now then
-            let p := peers[i]?.getD p
-            let c := p.udp.conn
-            let c := if c.idleDeadline == idle && !c.isClosed then
-                { c with phase := .closed, closeReason := some (true, 0, "unreachable") } else c
-            peers := peers.insert i { p with unreachable := none, udp := { p.udp with conn := c } }
-    | .refused => for (i, p) in peers.toList do peers := peers.insert i (suspect p now)
-    | .datagram _ none => pure ()
-    | .datagram d (some addr) =>
-      let some (hdr, _) := parseHeader d 0 cidLength | return ← loop ps peers ep
-      let name := (peerName addr).toUTF8
-      match ps.byCid[hdr.dcid]?, ps.byCid[hdr.dcid]?.bind (peers[·]?) with
-      | some i, some p =>
-        let addrs := ((name, addr) :: p.udp.addrs.filter (·.1 != name)).take 4
-        peers := peers.insert i { p with udp := { p.udp with addrs, conn := p.udp.conn.recvFrom now name d } }
-      | _, _ =>
-        if let (some s, false) := (serving, ← stop.get) then
-          if let some (_, e) := ep then
-            if (← currentEpoch) != e then ep ← (mkEndpoint (some s) : IO _)
-          if let some (cfg, _) := ep then
-            match Endpoint.onUnknown cfg name d now (← randomBytes cidLength) (← randomSeed) with
-            | .drop => pure ()
-            | .retry pkt | .reset pkt => try sock.send pkt (some addr) catch _ => pure ()
-            | .accept c cids =>
-              let i := ps.next
-              let udp : UDP.Peer := { addr, addrs := [(name, addr)], conn := c.recvFrom now name d,
-                                      initial := cids, cids := [] }
-              ps := { ps with next := i + 1 }.put i udp
-              peers := peers.insert i { udp }
-    -- New streams: the client opens its one stream, the server takes the client's.
+    let some (hdr, _) := parseHeader d 0 cidLength | return s
+    let name := (peerName addr).toUTF8
+    match s.ps.byCid[hdr.dcid]?, s.ps.byCid[hdr.dcid]?.bind (s.peers[·]?) with
+    | some i, some p =>
+      let addrs := ((name, addr) :: p.udp.addrs.filter (·.1 != name)).take 4
+      return { s with peers := s.peers.insert i { p with udp := { p.udp with addrs, conn := p.udp.conn.recvFrom now name d } } }
+    | _, _ =>
+      let (some srv, false) := (serving, ← stop.get) | return s
+      let mut ep := s.ep
+      if let some (_, e) := ep then
+        if (← currentEpoch) != e then ep ← mkEndpoint (some srv)
+      let some (cfg, _) := ep | return { s with ep }
+      match Endpoint.onUnknown cfg name d now (← randomBytes cidLength) (← randomSeed) with
+      | .drop => return { s with ep }
+      | .retry pkt | .reset pkt =>
+        try discard <| sock.native.send #[pkt] (some addr) catch _ => pure ()
+        return { s with ep }
+      | .accept c cids =>
+        let i := s.ps.next
+        let udp : UDP.Peer := { addr, addrs := [(name, addr)], conn := c.recvFrom now name d,
+                                initial := cids, cids := [] }
+        return { s with ep, ps := { s.ps with next := i + 1 }.put i udp, peers := s.peers.insert i { udp } }
+  -- New streams: the client opens its one stream, the server takes the client's.
+  let openStreams (peers : Std.HashMap Nat Peer) (now : Nat) : IO (Std.HashMap Nat Peer) := do
+    let mut peers := peers
     for (i, p) in peers.toList do
       if p.stream.isSome || !p.udp.conn.isEstablished then continue
       match serving, initial with
@@ -336,27 +320,92 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
         let some id := ids.find? (!Conn.isUni ·)
           | let streamDeadline := p.streamDeadline <|> some (now + s.streamTimeoutMs * 1000)
             peers := peers.insert i { p with udp := { p.udp with conn := c }, streamDeadline }
-        let l ← (Link.new kick (peerName p.udp.addr) : IO _)
+        let l ← Link.new kick (peerName p.udp.addr)
         links.modify (·.push l)
         peers := peers.insert i { p with udp := { p.udp with conn := c }, stream := some id, link := some l,
                                          streamDeadline := none }
-        discard <| (IO.asTask (prio := .dedicated) (s.onSession l) : IO _)
+        discard <| IO.asTask (prio := .dedicated) (s.onSession l)
       | none, some (_, ready) =>
         let (c, id) := p.udp.conn.openStream
         let some id := id | continue
-        let l ← (Link.new kick (peerName p.udp.addr) : IO _)
+        let l ← Link.new kick (peerName p.udp.addr)
         links.modify (·.push l)
         peers := peers.insert i { p with udp := { p.udp with conn := c }, stream := some id, link := some l }
         ready.resolve (.ok l)
       | none, none => pure ()
-    loop ps peers ep
-  let (ps, peers) := match initial with
-    | some (p, _) => (({} : Peers).put 0 p.udp |> fun ps => { ps with next := 1 }, ({} : Std.HashMap Nat Peer).insert 0 p)
-    | none => ({}, {})
-  try (loop ps peers (← mkEndpoint serving)).block
+    return peers
+  -- Service every connection and take what it has to send, dropping the closed ones; and the
+  -- links of sessions that closed their connection.
+  let collect (s : State) : IO (State × Array (Nat × Array ByteArray × Option SocketAddress) × Array Link) := do
+    let mut s := s
+    let mut out := #[]
+    let mut aborted := #[]
+    for (i, p) in s.peers.toList do
+      let p ← service p serving.isSome
+      if p.udp.conn.isClosed then
+        let reason := match p.udp.conn.closeReason with
+          | some (true, code, r) => if r.isEmpty then none else some (closeMessage (some (true, code, r)))
+          | _ => none
+        if let some l := p.link then l.hangUp reason
+        s := { s with peers := s.peers.erase i,
+                      ps := { s.ps with conns := s.ps.conns.erase i, byCid := p.udp.cids.foldl (·.erase ·) s.ps.byCid } }
+        if let some (_, ready) := initial then ready.resolve (.error (closeMessage p.udp.conn.closeReason))
+        continue
+      let dest := if serving.isSome then
+        some ((p.udp.addrs.find? (·.1 == p.udp.conn.peerAddr)).map (·.2) |>.getD p.udp.addr) else none
+      let (p, ds) ← drain p
+      if !ds.isEmpty then out := out.push (i, ds, dest)
+      if let some l := p.link then
+        if ← l.abort.get then aborted := aborted.push l
+      s := { s with peers := s.peers.insert i p, ps := s.ps.put i p.udp }
+    return (s, out, aborted)
+  let earliest : Option Nat → Option Nat → Option Nat
+    | some a, some b => some (min a b) | none, b => b | a, none => a
+  let rec sending : IO Unit := do
+    let (out, aborted, deadline, over) ← state.atomically do
+      let now ← nowUs
+      let s ← get
+      let peers ← openStreams (s.peers.map fun _ p => expire p now) now
+      let (s, out, aborted) ← collect { s with peers }
+      set s
+      let deadline := s.peers.fold (fun acc _ p =>
+        earliest acc (earliest p.udp.conn.nextTimeout (earliest p.streamDeadline (p.unreachable.map (·.1))))) none
+      return (out, aborted, deadline, s.peers.isEmpty && (serving.isNone || (← stop.get)))
+    for (i, ds, dest) in out do
+      if ← sendAll sock ds dest then
+        let now ← nowUs
+        state.atomically (modify fun s => { s with peers := s.peers.modify i (suspect · now) })
+        nudge
+    for l in aborted do l.done.resolve ()
+    if over then return
+    if (← kick.tryRecv).isNone then (idle kick deadline).block
+    repeat if (← kick.tryRecv).isNone then break
+    sending
+  let stopped ← IO.mkRef false
+  let receiving : IO Unit := do
+    while !(← stopped.get) do
+      try
+        match ← IO.wait (← sock.native.recv 65536).result? with
+        | none | some (.ok (_, none)) => pure ()
+        | some (.ok (d, some addr)) =>
+          state.atomically do set (← receive (← get) d addr)
+          nudge
+        | some (.error (.noSuchThing _ 111 _)) =>
+          let now ← nowUs
+          state.atomically (modify fun s => { s with peers := s.peers.map fun _ p => suspect p now })
+          nudge
+        | some (.error _) => nudge
+      catch _ => nudge
+  let receiver ← IO.asTask (prio := .dedicated) receiving
+  try sending
   catch e =>
     for l in ← links.get do l.hangUp
     throw e
+  finally
+    stopped.set true
+    while !(← IO.hasFinished receiver) do
+      sock.native.cancelRecv
+      IO.sleep 1
 
 /-! ## Dialing and listening -/
 
