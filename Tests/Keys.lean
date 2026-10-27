@@ -124,6 +124,26 @@ def run : IO Nat := do
   t.expect (checkHost file "h3:22" b.pub == .changed [5, 6]) "host changed on every line"
   t.expect (checkHost file "h4:22" a.pub == .unknown) "unknown host"
   t.expect (checkHost "" "h1:2222" a.pub == .unknown) "empty known hosts"
+  -- QUIC pins
+  let pin := seed 9
+  t.expect (parsePin (pinField pin) == some pin) "pin field round trip"
+  for bad in ["quic-mldsa65=00", "quic-mldsa65=zz", "quic-ed25519=" ++ (pinField pin).drop 13, "alice@laptop"] do
+    t.expect (parsePin bad == none) s!"bad pin field {bad.quote}"
+  t.expect (match fields (hostPublicLine a.pub pin "host") with
+    | [alg, hex, p, "host"] => parsePublic alg hex == some a.pub && parsePin p == some pin
+    | _ => false) "host public line round trip"
+  t.expect (parseAuthorized (hostPublicLine a.pub pin) == [a.pub]) "a host public line is a public key"
+  let pinned := String.intercalate "\n"
+    [knownHostLine (seed 1) "h1:2222" a.pub pin, knownHostLine (seed 2) "h2:22" b.pub,
+     "h3:22 " ++ hostPublicLine b.pub (seed 10) "comment", "h1:2222 " ++ hostPublicLine a.pub (seed 11)]
+  t.expect (parseKnownHosts pinned == [(hashHost (seed 1) "h1:2222", a.pub), (hashHost (seed 2) "h2:22", b.pub),
+    ("h3:22", b.pub), ("h1:2222", a.pub)]) "pinned known hosts parse"
+  t.expect (hostPins pinned "h1:2222" == [pin, seed 11]) "pins for a host"
+  t.expect (hostPins pinned "h2:22" == []) "no pin recorded"
+  t.expect (hostPins pinned "h3:22" == [seed 10]) "plain host pin"
+  t.expect (hostPins pinned "h4:22" == []) "unknown host has no pin"
+  t.expect (checkHost pinned "h1:2222" a.pub == .known) "pinned host known"
+  t.expect (checkHost pinned "h3:22" a.pub == .changed [3]) "pinned host changed"
   let fp := fingerprint a.pub
   t.expect (fp.startsWith "BLAKE2s:" && fp.length == 8 + 32) "fingerprint format"
   t.expect (fp == fingerprint a'.pub && fp != fingerprint b.pub) "fingerprint identifies the key"

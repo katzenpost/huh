@@ -1,9 +1,12 @@
 # huh
 
 A small remote shell written in Lean 4. `huh` is the client and `huhd` the server. They talk
-over TCP using the Noise `pqXX` handshake with hybrid ML-KEM-768 + X25519, ChaCha20-Poly1305
-and BLAKE2s (via [uproar](https://github.com/katzenpost/uproar)). Each side authenticates the
-other by its static public key, much as SSH does with keys only. A client's private key can be
+over QUIC (via [lean_quic](https://github.com/katzenpost/lean_quic)), or TCP, using the Noise
+`pqXX` handshake with hybrid ML-KEM-768 + X25519, ChaCha20-Poly1305 and BLAKE2s (via
+[uproar](https://github.com/katzenpost/uproar)). Each side authenticates the other by its static
+public key, much as SSH does with keys only. Over QUIC, the client also authenticates the server
+at the QUIC layer: TLS 1.3 with X25519MLKEM768 key exchange and an ML-DSA-65 certificate,
+accepted only under a pin from known-hosts. A client's private key can be
 encrypted under a passphrase, stretched with Argon2id (via
 [Cryptlib](https://github.com/katzenpost/cryptlib)).
 
@@ -78,7 +81,9 @@ On the server, as the account people will log in to, make a host key and authori
 `--host` writes `~/.huh/host_key.private` and never asks for a passphrase. Host keys are never
 encrypted, so a server can start on its own after a reboot. `huhd` refuses an encrypted key.
 
-A public key line looks like `huh-mlkem768hx25519 <hex> [comment]`. To give clients a
+A public key line looks like `huh-mlkem768hx25519 <hex> [comment]`. A host's adds its QUIC pin
+after the key, `quic-mldsa65=<hex>`: the SHA-256 of the SubjectPublicKeyInfo of the host's
+ML-DSA-65 key, which is derived from the host key, so one file holds both. To give clients a
 ready known-hosts line for this server, see [Known hosts](#known-hosts).
 
 ### huh-keygen
@@ -95,7 +100,7 @@ ready known-hosts line for this server, see [Known hosts](#known-hosts).
 | `-N passphrase` | the new passphrase, without asking; `""` for none                              |
 | `-p`            | change or remove the passphrase of an existing client key                      |
 | `--host`        | make a host key: never encrypted, never asks                                   |
-| `-H host:port`  | print a hashed known-hosts line for the key's `.pub`                           |
+| `-H host:port`  | print a hashed known-hosts line for the key's `.pub`, with its QUIC pin        |
 
 `huh-keygen` never overwrites an existing key file.
 
@@ -105,7 +110,8 @@ ready known-hosts line for this server, see [Known hosts](#known-hosts).
 
 | Option                   | What it does                                                  | Default                   |
 |--------------------------|---------------------------------------------------------------|---------------------------|
-| `--listen addr:port`     | address to listen on; repeat it for several, e.g. `--listen 127.0.0.1:2222 --listen [::1]:2222` | `0.0.0.0:2222` |
+| `--listen addr:port`     | QUIC (UDP) address to listen on; repeat it for several, e.g. `--listen 127.0.0.1:2222 --listen [::1]:2222` | `0.0.0.0:2222`, unless `--tcp-listen` is given |
+| `--tcp-listen addr:port` | TCP address to listen on; repeat it for several                | none                      |
 | `--host-key path`        | the server's private key, ending in `.private`                | `~/.huh/host_key.private` |
 | `--authorized-keys path` | public keys allowed to log in                                 | `~/.huh/authorized_keys`  |
 | `--syslog`               | log to syslog instead of stderr                               | off                       |
@@ -121,13 +127,15 @@ The session's environment holds:
 - `TERM`, when the client asked for a terminal
 - `HUH_CLIENT`, the client's address
 
-A client must finish the handshake within 30 seconds.
+A client must finish the handshake within 30 seconds. A QUIC connection that opens no stream
+within 30 seconds of its QUIC handshake is closed.
 
 On SIGTERM or SIGINT, `huhd`:
 
 1. stops accepting connections
 2. sends SIGHUP to every session's processes
-3. gives them 5 seconds to exit, so clients get their exit status
+3. gives them 5 seconds to exit, so clients get their exit status (over QUIC, also time for the
+   clients to receive the rest of their sessions)
 4. kills whatever is left
 5. exits 0
 
@@ -144,7 +152,7 @@ Logs go to the journal: `journalctl -u huhd`.
 
 ## Use the client
 
-    huh [-i key] [-t|-T] [-p port] host [command...]
+    huh [-i key] [-t|-T] [-p port] [--tcp] host [command...]
 
     huh server.example.org                  # interactive shell
     huh -p 2200 server.example.org uptime   # run one command
@@ -156,6 +164,7 @@ Logs go to the journal: `journalctl -u huhd`.
 | `-t`      | ask for a terminal (PTY) on the server                                            |
 | `-T`      | don't ask for a terminal                                                          |
 | `-p port` | server port; default `2222`                                                       |
+| `--tcp`   | connect over TCP instead of QUIC                                                  |
 
 With neither `-t` nor `-T`, you get a terminal when stdin is a terminal and no command is given,
 and plain pipes otherwise. The pipe mode keeps stdout and stderr separate and is safe for binary
@@ -169,14 +178,15 @@ data. With a terminal:
 
 - the remote command's exit code
 - 128 + the signal number if it was killed by a signal
-- 255 if the connection failed, or the key's passphrase was wrong three times
+- 255 if the connection failed, or the key's passphrase was wrong three times. Over QUIC, a server
+  that vanishes without closing the connection is noticed after 30 seconds of silence.
 - 143 if `huh` itself got SIGTERM; your terminal is restored first and the remote side is hung up
 
 ### Known hosts
 
 `~/.huh/known_hosts` records the key of every server you trust, one per line:
 
-    |b2|<salt>|<hash> huh-mlkem768hx25519 <hex>
+    |b2|<salt>|<hash> huh-mlkem768hx25519 <hex> quic-mldsa65=<hex>
     server.example.org:2222 huh-mlkem768hx25519 <hex>
 
 The first field names the server as `host:port`, written exactly as you type it on the command
@@ -188,20 +198,26 @@ line, with the port (`huh -p 2200 server` is `server:2200`). It is either:
 
 Blank lines and lines starting with `#` are ignored.
 
-The first time you connect to a `host:port` that isn't in the file, `huh` shows the server's key
-fingerprint and asks whether to trust it. Answering `yes` adds a hashed line.
+Over QUIC, `huh` needs the server's QUIC pin before it sends anything, so it connects only to a
+`host:port` whose line has one, and refuses a server that presents another key. Add the line
+with `huh-keygen -H`, below. A line without a pin works with `--tcp` only.
+
+Over TCP, the first time you connect to a `host:port` that isn't in the file, `huh` shows the
+server's key fingerprint and asks whether to trust it. Answering `yes` adds a hashed line,
+without a QUIC pin.
 
 If a server's key later changes, `huh` refuses to connect and names the line holding the old key.
 Delete that line if you expect the change.
 
-To trust a server without the prompt, get its `host_key.pub` and add a line with `huh-keygen -H`.
-This prints a hashed known-hosts line for a public key; it never creates a key:
+To trust a server, get its `host_key.pub` and add a line with `huh-keygen -H`. This prints a
+hashed known-hosts line for a public key, with the QUIC pin; it never creates a key:
 
     huh-keygen -H server.example.org:2222 -f host_key.pub >> ~/.huh/known_hosts
 
 `-f` takes a `.pub` file, or a private key file, in which case it reads the `.pub` beside it.
-Without `-f`, it uses `~/.huh/host_key.pub`. That lets a server's admin print the line for clients
-directly:
+Without `-f`, it uses `~/.huh/host_key.pub`. A host key's `.pub` from before QUIC has no pin; the
+pin is then derived from the private key beside it, so a server's admin can print the line for
+clients directly:
 
     huh-keygen -H server.example.org:2222
 
@@ -212,6 +228,8 @@ directly:
     make pipe-test     # a file sent through huh to a local huhd arrives intact (SIZE=bytes)
     make pty-test      # an interactive session on a pseudo-terminal, and the passphrase prompt
     make signal-test   # SIGTERM handling in huh and huhd
+
+The end-to-end tests run over QUIC; set `TRANSPORT=tcp` to run them over TCP.
 
 ## License
 

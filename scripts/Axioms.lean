@@ -2,7 +2,9 @@ import Huh
 
 open Lean Elab Command
 
--- Every theorem in a `Huh` module may depend only on Lean's own axioms.
+-- Every theorem written in a `Huh` module may depend only on Lean's own axioms. Generated
+-- equations and injectivity lemmas are skipped: those of a structure holding a lean_quic
+-- connection inherit cryptlib's X25519 axioms through its field types.
 #eval show CommandElabM Unit from do
   let env ← getEnv
   let allowed := [``propext, ``Classical.choice, ``Quot.sound]
@@ -12,6 +14,7 @@ open Lean Elab Command
     let some idx := env.getModuleIdxFor? name | continue
     unless (`Huh).isPrefixOf (env.header.moduleNames[idx.toNat]!) do continue
     let .thmInfo _ := ci | continue
+    if name.isInternal || (← liftCoreM (findDeclarationRanges? name)).isNone then continue
     checked := checked + 1
     for a in ← liftCoreM (collectAxioms name) do
       unless allowed.contains a do bad := bad.push (name, a)
