@@ -1,0 +1,23 @@
+name: Lean Action CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          build-args: "Huh huh huhd huh-keygen huh-test"
+      - name: Run the unit tests
+        env:
+          # panics in compiled Lean print a message but exit 0 unless this is set
+          LEAN_ABORT_ON_PANIC: "1"
+        run: ./.lake/build/bin/huh-test
+      - name: Check the theorems use no axioms beyond Lean's own
+        run: ./scripts/check-axioms.sh
