@@ -4,12 +4,13 @@ import Huh.Passphrase
 open Huh
 
 def usage : String :=
-  "usage: huh [-i key] [-t|-T] [-p port] host [command...]"
+  "usage: huh [-i key] [-t|-T] [-p port] [--tcp] host [command...]"
 
 structure Args where
   key : Option String := none
   pty : Option Bool := none
   port : UInt16 := 2222
+  tcp : Bool := false
   host : String := ""
   cmd : List String := []
 
@@ -18,6 +19,7 @@ def parseArgs (a : Args) : List String → Option Args
   | "-t" :: rest => parseArgs { a with pty := some true } rest
   | "-T" :: rest => parseArgs { a with pty := some false } rest
   | "-p" :: p :: rest => do parseArgs { a with port := ← Net.parsePort p } rest
+  | "--tcp" :: rest => parseArgs { a with tcp := true } rest
   | host :: cmd => if host.startsWith "-" then none else some { a with host, cmd }
   | [] => none
 
@@ -44,7 +46,14 @@ def main (args : List String) : IO UInt32 := do
     else pure none
   let cmd := if a.cmd.isEmpty then none else some (" ".intercalate a.cmd).toUTF8
   let hostId := s!"{a.host}:{a.port}"
+  let knownHosts := dir / "known_hosts"
+  let transport ← if a.tcp then pure .tcp else do
+    let pins := hostPins (← readTextOrEmpty knownHosts) hostId
+    if pins.isEmpty then
+      return ← fail (s!"{knownHosts} has no QUIC pin for {hostId}; on the server, run\n" ++
+        s!"  huh-keygen -H {hostId}\nand add its output to {knownHosts}, or use --tcp")
+    pure (.quic pins)
   let cfg : Client.Config :=
-    { key := key, verifyHost := Client.verifyKnownHost (dir / "known_hosts") hostId, pty, cmd }
-  let code ← Client.run cfg a.host a.port
+    { key := key, verifyHost := Client.verifyKnownHost knownHosts hostId, pty, cmd }
+  let code ← Client.run cfg transport a.host a.port
   IO.Process.exit code.toUInt8

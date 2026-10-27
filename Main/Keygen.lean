@@ -1,4 +1,5 @@
 import Huh.Keys
+import Huh.QuicId
 import Huh.Passphrase
 
 open Huh
@@ -36,14 +37,23 @@ def validHostId (h : String) : Bool :=
   parts.length ≥ 2 && !(":".intercalate parts.dropLast).isEmpty && portOk
 
 /-- Print a hashed known-hosts line for the public key of `keyfile`, or for `keyfile` itself
-when it is a `.pub` file. -/
+when it is a `.pub` file, with the host's QUIC pin. A host key's `.pub` file from before QUIC
+has no pin, which is then derived from the private key beside it. -/
 def printKnownHost (host : String) (keyfile : System.FilePath) : IO UInt32 := do
   unless validHostId host do IO.eprintln s!"{host}: expected host:port"; return 2
   let pubPath := if keyfile.extension == some "pub" then keyfile
     else publicPath (privatePath keyfile)
   let text ← try IO.FS.readFile pubPath catch e => IO.eprintln s!"{e}"; return 1
   let [pub] := parseAuthorized text | IO.eprintln s!"{pubPath}: expected one public key"; return 1
-  IO.println (knownHostLine (← IO.getRandomBytes 32) host pub)
+  let pin ← match (contentLines text).head?.map fields with
+    | some (_ :: _ :: p :: _) => pure (parsePin p)
+    | _ => pure none
+  let pin ← match pin with
+    | some pin => pure (some pin)
+    | none => try pure (some (QuicId.pin (← readHostSeed (pubPath.withExtension "private"))))
+              catch _ => pure none
+  if pin.isNone then IO.eprintln s!"{pubPath}: no QUIC pin; the line works with huh --tcp only"
+  IO.println (knownHostLine (← IO.getRandomBytes 32) host pub pin)
   return 0
 
 /-- The new passphrase: `-N`, or asked for twice. Empty means none. -/
@@ -99,7 +109,9 @@ def main (args : List String) : IO UInt32 := do
     let seed ← IO.getRandomBytes 32
     let kp ← IO.ofExcept ((keyPairOfSeed seed).mapError IO.userError)
     writePrivate path (← sealSeed pass seed)
-    IO.FS.writeFile (publicPath path) (publicLine kp.pub a.comment ++ "\n")
+    let line := if a.hostKey then hostPublicLine kp.pub (QuicId.pin seed) a.comment
+      else publicLine kp.pub a.comment
+    IO.FS.writeFile (publicPath path) (line ++ "\n")
     IO.println s!"{publicPath path} {fingerprint kp.pub}"
     return 0
   catch e =>

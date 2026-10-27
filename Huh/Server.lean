@@ -10,6 +10,7 @@ import Huh.Session
 import Huh.Keys
 import Huh.Log
 import Huh.Net
+import Huh.Quic
 import Std.Sync.Channel
 import Std.Async.Signal
 import Std.Data.HashMap
@@ -54,6 +55,8 @@ abbrev Spawner := Option PtyReq → Option ByteArray → IO Proc
 
 structure Config where
   hostKey : KeyPair
+  /-- The host key's seed, from which the QUIC identity is derived. -/
+  hostSeed : ByteArray := .empty
   authorized : List ByteArray
   log : UInt32 → String → IO Unit
 
@@ -181,6 +184,23 @@ def connection (cfg : Config) (c : Net.Socket) (spawn : String → Spawner := sp
   catch e => cfg.log logWarning s!"{peer}: {e}"
   try c.shutdown.block catch _ => pure ()
 
+/-- How long a finished QUIC session waits for the client to receive the rest of it. Unlike
+TCP's, a QUIC connection's unsent data is lost when the process exits. -/
+def quicDrainMs : Nat := 5000
+
+/-- Serve one QUIC session until it ends and the client has all of it, or `quicDrainMs` has
+passed. Failures are logged, never thrown. -/
+def quicConnection (cfg : Config) (l : Quic.Link) (spawn : String → Spawner := spawnReal)
+    (timeoutMs : Nat := handshakeTimeoutMs.toNat) : IO Unit := do
+  try
+    let deadline ← Net.deadline timeoutMs
+    session cfg l.peer l.frames (spawn l.peer) (readFrameWith (l.readBefore deadline))
+    l.finish
+    l.awaitDone quicDrainMs
+  catch e =>
+    cfg.log logWarning s!"{l.peer}: {e}"
+    l.close
+
 def bind (addr : SocketAddress) : IO TCP.Socket.Server := do
   let srv ← TCP.Socket.Server.mk
   srv.bind addr
@@ -257,21 +277,37 @@ partial def acceptLoop (live : Live) (cfg : Config) (srv : TCP.Socket.Server)
     IO.sleep 100
   acceptLoop live cfg srv spawn timeoutMs
 
-/-- Listen on every address and serve connections until SIGTERM or SIGINT, then shut down. Accept
-loops are still blocked in `accept` on return, so the caller should end the process. -/
-def listen (cfg : Config) (addrs : Array SocketAddress) : IO Unit := do
+/-- Serve QUIC sessions on `addr` until `Quic.Server.stop`. -/
+def listenQuic (live : Live) (cfg : Config) (addr : SocketAddress)
+    (spawn : String → Spawner := spawnReal) (timeoutMs : Nat := handshakeTimeoutMs.toNat) :
+    IO Quic.Server :=
+  Quic.listen addr cfg.hostSeed (streamTimeoutMs := timeoutMs) fun l => do
+    if ← live.stopping.get then l.close; return
+    let conn ← live.add
+    quicConnection cfg l (fun peer => live.track conn (spawn peer)) timeoutMs
+    live.remove conn
+
+/-- Listen on every QUIC (UDP) and TCP address and serve connections until SIGTERM or SIGINT,
+then shut down. Accept loops are still blocked in `accept` on return, so the caller should end
+the process. -/
+def listen (cfg : Config) (quicAddrs tcpAddrs : Array SocketAddress) : IO Unit := do
   FFI.ignoreSigpipe
   let term ← (← Signal.Waiter.mk .sigterm false).wait
   let int ← (← Signal.Waiter.mk .sigint false).wait
   let live ← Live.new
   -- bind everything first, so a bad address fails before any connection is served
-  let srvs ← addrs.mapM fun a => do
-    try pure (a, ← bind a) catch e => throw (IO.userError s!"listen on {a}: {e}")
+  let srvs ← tcpAddrs.mapM fun a => do
+    try pure (a, ← bind a) catch e => throw (IO.userError s!"listen on tcp {a}: {e}")
+  let quics ← quicAddrs.mapM fun a => do
+    try listenQuic live cfg a catch e => throw (IO.userError s!"listen on quic {a}: {e}")
+  for q in quics do
+    cfg.log logInfo s!"listening on quic {q.addr}"
   for (a, srv) in srvs do
-    cfg.log logInfo s!"listening on {a}"
+    cfg.log logInfo s!"listening on tcp {a}"
     discard <| IO.asTask (prio := .dedicated) (acceptLoop live cfg srv)
   discard <| IO.waitAny [term, int]
   cfg.log logInfo "shutting down"
+  for q in quics do q.stop
   live.shutdown
 
 end Huh.Server

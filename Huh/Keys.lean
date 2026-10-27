@@ -20,9 +20,10 @@ be able to start unattended. An encrypted file is
 with `m` (memory in KiB), `t` (passes) and `p` (lanes) as 32-bit little-endian numbers. The
 cipher key is Argon2id of the passphrase and salt under those parameters, and the 48-byte header
 before the ciphertext is the associated data. Public keys are written
-one per line as `huh-mlkem768hx25519 <hex> [comment]`. A known-hosts line puts the host first:
-`host:port` in plain text, or hashed as `|b2|<salt>|<hash>`, the BLAKE2s of `host:port` keyed
-with a random 32-byte salt, both in hex. -/
+one per line as `huh-mlkem768hx25519 <hex> [comment]`; a host's adds its QUIC pin after the key,
+as `quic-mldsa65=<hex>`. A known-hosts line puts the host first: `host:port` in plain text, or
+hashed as `|b2|<salt>|<hash>`, the BLAKE2s of `host:port` keyed with a random 32-byte salt, both
+in hex. -/
 
 namespace Huh
 
@@ -37,6 +38,20 @@ def keyPairOfSeed (seed : ByteArray) : Except String KeyPair := do
 
 def publicLine (pub : ByteArray) (comment : String := "") : String :=
   s!"{algorithm} {byteArrayToHex pub}" ++ (if comment.isEmpty then "" else s!" {comment}")
+
+def pinPrefix : String := "quic-mldsa65="
+
+def pinField (pin : ByteArray) : String := pinPrefix ++ byteArrayToHex pin
+
+/-- A QUIC pin field: the SHA-256 of the host's ML-DSA-65 SubjectPublicKeyInfo. -/
+def parsePin (field : String) : Option ByteArray := do
+  guard (field.startsWith pinPrefix)
+  let pin ← hexStringToByteArray (field.drop pinPrefix.length).toString
+  guard (pin.size == 32)
+  return pin
+
+def hostPublicLine (pub pin : ByteArray) (comment : String := "") : String :=
+  publicLine pub (pinField pin ++ (if comment.isEmpty then "" else s!" {comment}"))
 
 def parsePublic (alg hex : String) : Option ByteArray := do
   guard (alg == algorithm)
@@ -60,15 +75,15 @@ def parseAuthorized (text : String) : List ByteArray :=
     | alg :: hex :: _ => parsePublic alg hex
     | _ => none
 
-/-- Known-hosts entries with their line numbers, counted from 1: `(line, host, key)`. -/
-def knownHostEntries (text : String) : List (Nat × String × ByteArray) :=
+/-- Known-hosts entries with their line numbers, counted from 1: `(line, host, key, pin)`. -/
+def knownHostEntries (text : String) : List (Nat × String × ByteArray × Option ByteArray) :=
   (text.splitOn "\n").zipIdx.filterMap fun (l, i) => do
     guard (!l.trimAscii.startsWith "#")
-    let host :: alg :: hex :: _ := fields l | none
-    return (i + 1, host, ← parsePublic alg hex)
+    let host :: alg :: hex :: rest := fields l | none
+    return (i + 1, host, ← parsePublic alg hex, rest.head?.bind parsePin)
 
 def parseKnownHosts (text : String) : List (String × ByteArray) :=
-  (knownHostEntries text).map (·.2)
+  (knownHostEntries text).map fun (_, host, key, _) => (host, key)
 
 def hostHash (salt : ByteArray) (hostId : String) : ByteArray :=
   Cryptlib.Util.Bytes.ofVector (Cryptlib.Primitives.Hash.Blake2s.hashKeyed salt hostId.toUTF8)
@@ -86,8 +101,11 @@ def hostMatches (field hostId : String) : Bool :=
     | _, _ => false
   | _ => field == hostId
 
-def knownHostLine (salt : ByteArray) (hostId : String) (pub : ByteArray) : String :=
-  hashHost salt hostId ++ " " ++ publicLine pub
+def knownHostLine (salt : ByteArray) (hostId : String) (pub : ByteArray)
+    (pin : Option ByteArray := none) : String :=
+  hashHost salt hostId ++ " " ++ match pin with
+    | some pin => hostPublicLine pub pin
+    | none => publicLine pub
 
 inductive HostCheck where
   | known
@@ -98,9 +116,14 @@ inductive HostCheck where
 
 def checkHost (knownHosts hostId : String) (pub : ByteArray) : HostCheck :=
   let entries := (knownHostEntries knownHosts).filter (hostMatches ·.2.1 hostId)
-  if entries.any (·.2.2 == pub) then .known
+  if entries.any (·.2.2.1 == pub) then .known
   else if entries.isEmpty then .unknown
   else .changed (entries.map (·.1))
+
+/-- The QUIC pins known-hosts records for `hostId`. -/
+def hostPins (knownHosts hostId : String) : List ByteArray :=
+  (knownHostEntries knownHosts).filterMap fun (_, host, _, pin) =>
+    if hostMatches host hostId then pin else none
 
 def readTextOrEmpty (path : System.FilePath) : IO String := do
   if ← path.pathExists then IO.FS.readFile path else pure ""
@@ -208,12 +231,14 @@ def readKeyFile (path : System.FilePath) : IO KeyFile := do
     throw (IO.userError s!"{path} not found; private key files now end in .private: mv {old} {path}")
   IO.ofExcept ((parseKeyFile (← IO.FS.readBinFile path)).mapError fun e => IO.userError s!"{path}: {e}")
 
-/-- A host's private key, which must not be encrypted. -/
-def readHostKey (path : System.FilePath) : IO KeyPair := do
+/-- A host's private key seed, which must not be encrypted. -/
+def readHostSeed (path : System.FilePath) : IO ByteArray := do
   match ← readKeyFile path with
-  | .plain seed =>
-    IO.ofExcept ((keyPairOfSeed seed).mapError fun e => IO.userError s!"{path}: {e}")
+  | .plain seed => return seed
   | .encrypted _ => throw (IO.userError s!"{path}: host keys must not be encrypted")
+
+def readHostKey (path : System.FilePath) : IO KeyPair := do
+  IO.ofExcept ((keyPairOfSeed (← readHostSeed path)).mapError fun e => IO.userError s!"{path}: {e}")
 
 def homeDir : IO System.FilePath := do
   let some home ← IO.getEnv "HOME" | throw (IO.userError "HOME is not set")

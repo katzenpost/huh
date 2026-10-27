@@ -120,22 +120,33 @@ def realTerminal : IO Terminal := do
            writeStderr := FFI.write 2, winsize := FFI.ttyWinsize 0,
            resized := do let t ← winch.wait; return discard (IO.wait t) }
 
+/-- How to reach the server: QUIC, accepting it under one of the pins, or plain TCP. -/
+inductive Transport where
+  | quic (pins : List ByteArray)
+  | tcp
+
 /-- Run a session with `host`, in raw mode when a PTY is requested. SIGTERM ends it early with
 exit code 143, after the terminal is restored. -/
-def run (cfg : Config) (host : String) (port : UInt16) : IO UInt32 := do
+def run (cfg : Config) (transport : Transport) (host : String) (port : UInt16) : IO UInt32 := do
   FFI.ignoreSigpipe
   let term ← (← Std.Async.Signal.Waiter.mk .sigterm false).wait
   let saved ← IO.mkRef none
   let raw := if cfg.pty.isSome then do saved.set (some (← FFI.ttyRaw 0)) else pure ()
   let restore := do if let some s ← saved.get then FFI.ttyRestore 0 s
-  let sock ← IO.mkRef none
-  let hangup := do
-    if let some s ← sock.get then try (s : Net.Socket).shutdown.block catch _ => pure ()
+  let close ← IO.mkRef (pure () : IO Unit)
+  let hangup := do try (← close.get) catch _ => pure ()
   try
     let conversation ← IO.asTask (prio := .dedicated) do
-      let s ← Net.dial host port
-      sock.set (some s)
-      session cfg (Net.frames s) (← realTerminal) raw
+      let frames ← match transport with
+        | .quic pins => do
+          let l ← Quic.dial host port pins
+          close.set l.close
+          pure l.frames
+        | .tcp => do
+          let s ← Net.dial host port
+          close.set s.shutdown.block
+          pure (Net.frames s)
+      session cfg frames (← realTerminal) raw
     let terminated := (ExceptT.run term).map fun _ => .ok (128 + signalNumber "TERM")
     let code ← IO.ofExcept (← IO.waitAny [conversation, terminated])
     restore
