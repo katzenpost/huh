@@ -101,8 +101,9 @@ def Link.frames (l : Link) : Frames := ⟨l.send, readFrameWith l.read⟩
 
 /-- Wait up to `ms` milliseconds for the connection to be gone. -/
 def Link.awaitDone (l : Link) (ms : Nat) : IO Unit := do
-  let timer ← IO.asTask (IO.sleep ms.toUInt32)
-  discard <| IO.waitAny [l.done.result!.map fun _ => (), timer.map fun _ => ()]
+  -- a libuv timer: a task sleeping in `IO.sleep` would hold one of the task pool's few threads
+  let timer ← (Async.sleep (.ofNat ms) : Async Unit).toIO
+  discard <| IO.waitAny [l.done.result!.map fun _ => (), Task.map (fun _ => ()) timer]
 
 /-- Close the connection without waiting for anything still unsent, returning once the close is
 sent, or after a second. -/
