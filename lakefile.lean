@@ -11,7 +11,7 @@ package huh where
 require uproar from git "https://github.com/katzenpost/uproar.git" @ "c9f471ecbeb6c80809aafe50c7d3bce6e4a8791c"
 
 -- Directly, for Argon2 (Cryptlib.Primitives.KDF.Argon2), and at lean_tls's revision for ML-DSA-65.
-require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "cefb4a7634e71ec90cf05a395584facc7fcc12d3"
+require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "4a051b2a661db75b66df58b99cee56013842b571"
 
 require lean_quic from git "https://github.com/katzenpost/lean_quic.git" @ "56ef6a8a1b8777c77c07deae9ba0b93b1756bf3c"
 
