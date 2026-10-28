@@ -255,8 +255,9 @@ def Live.shutdown (live : Live) (graceMs : Nat := shutdownGraceMs) : IO Unit := 
   live.signalAll "HUP"
   let pending := (← live.conns.get).toList.map fun (_, c) => c.done.result!
   let all ← IO.mapTasks (fun _ => pure ()) pending
-  let timer ← IO.asTask (IO.sleep graceMs.toUInt32)
-  discard <| IO.waitAny [all.map fun _ => (), timer.map fun _ => ()]
+  -- a libuv timer: a task sleeping in `IO.sleep` would hold one of the task pool's few threads
+  let timer ← (Std.Async.sleep (.ofNat graceMs) : Async Unit).toIO
+  discard <| IO.waitAny [all.map fun _ => (), Task.map (fun _ => ()) timer]
   live.signalAll "KILL"
 
 /-- Accept connections until a shutdown begins, serving each on its own task. -/
