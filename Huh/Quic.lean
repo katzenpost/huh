@@ -5,6 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 
 import Huh.Frame
 import Huh.QuicId
+import Huh.Udp
 import LeanQUIC
 import Std.Async.DNS
 import Std.Sync.CancellationToken
@@ -37,6 +38,9 @@ def recvWindow : Nat := 1024 * 1024
 /-- PINGs after this long without sending. Besides keeping the connection inside the 30-second
 idle timeout, a PING to a server whose process is gone draws the port unreachable that ends it. -/
 def keepAliveMs : Nat := 5000
+
+/-- Datagrams the receiving task handles before letting the sending task in. -/
+def recvGroup : Nat := 4
 
 def quicConfig : LeanQUIC.Config :=
   { keepAlive := keepAliveMs, maxStreamsBidi := 1, maxStreamsUni := 0 }
@@ -206,18 +210,6 @@ def drain (p : Peer) : IO (Peer × Array ByteArray) := do
     | none => break
   return ({ p with udp := { p.udp with conn := c } }, out)
 
-/-- Send `ds`, starting every send before waiting for any; whether the peer's port was reported
-unreachable. -/
-def sendAll (sock : UDP.Socket) (ds : Array ByteArray) (dest : Option SocketAddress) : IO Bool := do
-  let mut sends := #[]
-  let mut refused := false
-  for d in ds do
-    try sends := sends.push (← sock.native.send #[d] dest)
-    catch | .noSuchThing _ 111 _ => refused := true | _ => pure ()
-  for r in sends do
-    if let some (.error (.noSuchThing _ 111 _)) ← IO.wait r.result? then refused := true
-  return refused
-
 /-- Why a connection closed, from `Conn.closeReason`: whether we closed it, the error code, and the
 reason. -/
 def closeMessage : Option (Bool × Nat × String) → String
@@ -266,7 +258,7 @@ One task receives: it hands each datagram to its connection, or to the server to
 other sends: it acts on deadlines, moves stream data between the connections and their sessions,
 and sends what the connections have to send, waiting for a nudge from the receiving task or a
 session when there is nothing to do. -/
-partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Option Serving)
+partial def run (sock : Udp.Socket) (kick : CloseableChannel Unit) (serving : Option Serving)
     (initial : Option (Peer × IO.Promise (Except String Link))) (stop : IO.Ref Bool) : IO Unit := do
   let resetKey ← randomBytes 32
   let tokenKey ← randomBytes 32
@@ -303,7 +295,7 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
       match Endpoint.onUnknown cfg name d now (← randomBytes cidLength) (← randomSeed) with
       | .drop => return { s with ep }
       | .retry pkt | .reset pkt =>
-        try discard <| sock.native.send #[pkt] (some addr) catch _ => pure ()
+        try discard <| sock.send #[pkt] (some addr) catch _ => pure ()
         return { s with ep }
       | .accept c cids =>
         let i := s.ps.next
@@ -373,7 +365,7 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
         earliest acc (earliest p.udp.conn.nextTimeout (earliest p.streamDeadline (p.unreachable.map (·.1))))) none
       return (out, aborted, deadline, s.peers.isEmpty && (serving.isNone || (← stop.get)))
     for (i, ds, dest) in out do
-      if ← sendAll sock ds dest then
+      if ← sock.send ds dest then
         let now ← nowUs
         state.atomically (modify fun s => { s with peers := s.peers.modify i (suspect · now) })
         nudge
@@ -386,17 +378,16 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
   let receiving : IO Unit := do
     while !(← stopped.get) do
       try
-        match ← IO.wait (← sock.native.recv 65536).result? with
-        | none | some (.ok (_, none)) => pure ()
-        | some (.ok (d, some addr)) =>
-          state.atomically do set (← receive (← get) d addr)
-          nudge
-        | some (.error (.noSuchThing _ 111 _)) =>
+        let ds ← sock.recv recvGroup.toUInt32
+        if ds.isEmpty then continue
+        state.atomically do set (← ds.foldlM (fun s (d, addr) => receive s d addr) (← get))
+        nudge
+      catch
+        | .noSuchThing _ 111 _ =>
           let now ← nowUs
           state.atomically (modify fun s => { s with peers := s.peers.map fun _ p => suspect p now })
           nudge
-        | some (.error _) => nudge
-      catch _ => nudge
+        | _ => nudge
   let receiver ← IO.asTask (prio := .dedicated) receiving
   try sending
   catch e =>
@@ -404,20 +395,20 @@ partial def run (sock : UDP.Socket) (kick : CloseableChannel Unit) (serving : Op
     throw e
   finally
     stopped.set true
-    while !(← IO.hasFinished receiver) do
-      sock.native.cancelRecv
-      IO.sleep 1
+    sock.shutdown
+    discard <| IO.wait receiver
+    sock.close
 
 /-! ## Dialing and listening -/
 
-def bindAny (sock : UDP.Socket) : SocketAddress → IO Unit
+def bindAny (sock : Udp.Socket) : SocketAddress → IO Unit
   | .v4 _ => sock.bind (.v4 { addr := IPv4Addr.ofParts 0 0 0 0, port := 0 })
   | .v6 _ => sock.bind (.v6 { addr := IPv6Addr.ofParts 0 0 0 0 0 0 0 0, port := 0 })
 
 /-- Connect to `addr`, accepting the server only under one of `pins`, and open the session's
 stream. -/
 def connect (addr : SocketAddress) (pins : List ByteArray) : IO Link := do
-  let sock ← UDP.Socket.mk
+  let sock ← Udp.Socket.new addr
   bindAny sock addr
   sock.connect addr
   let tls : LeanTLS.Handshake.Client.Config := { alpn, transportParams := .empty, pins, schemes := [.mldsa65] }
@@ -465,7 +456,7 @@ its own task. A connection that opens no stream within `streamTimeoutMs` of the 
 is closed. -/
 def listen (addr : SocketAddress) (hostSeed : ByteArray) (onSession : Link → IO Unit)
     (streamTimeoutMs : Nat := 10000) : IO Server := do
-  let sock ← UDP.Socket.mk
+  let sock ← Udp.Socket.new addr
   sock.bind addr
   let kick ← CloseableChannel.new
   let stopFlag ← IO.mkRef false

@@ -7,12 +7,15 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -328,5 +331,156 @@ LEAN_EXPORT lean_obj_res huh_syslog(uint32_t prio, b_lean_obj_arg msg) {
 
 LEAN_EXPORT lean_obj_res huh_ignore_sigpipe(void) {
   signal(SIGPIPE, SIG_IGN);
+  return io_unit();
+}
+
+/* UDP sockets. An address is its IP bytes (4 or 16) then its port, big-endian. */
+
+static socklen_t to_sockaddr(b_lean_obj_arg addr, struct sockaddr_storage *ss) {
+  const uint8_t *a = lean_sarray_cptr(addr);
+  size_t n = lean_sarray_size(addr);
+  memset(ss, 0, sizeof(*ss));
+  if (n == 6) {
+    struct sockaddr_in *s4 = (struct sockaddr_in *)ss;
+    s4->sin_family = AF_INET;
+    memcpy(&s4->sin_addr, a, 4);
+    memcpy(&s4->sin_port, a + 4, 2);
+    return sizeof(*s4);
+  }
+  if (n == 18) {
+    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ss;
+    s6->sin6_family = AF_INET6;
+    memcpy(&s6->sin6_addr, a, 16);
+    memcpy(&s6->sin6_port, a + 16, 2);
+    return sizeof(*s6);
+  }
+  return 0;
+}
+
+static lean_object *of_sockaddr(const struct sockaddr_storage *ss) {
+  if (ss->ss_family == AF_INET6) {
+    const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)ss;
+    lean_object *b = lean_alloc_sarray(1, 18, 18);
+    memcpy(lean_sarray_cptr(b), &s6->sin6_addr, 16);
+    memcpy(lean_sarray_cptr(b) + 16, &s6->sin6_port, 2);
+    return b;
+  }
+  const struct sockaddr_in *s4 = (const struct sockaddr_in *)ss;
+  lean_object *b = lean_alloc_sarray(1, 6, 6);
+  memcpy(lean_sarray_cptr(b), &s4->sin_addr, 4);
+  memcpy(lean_sarray_cptr(b) + 4, &s4->sin_port, 2);
+  return b;
+}
+
+LEAN_EXPORT lean_obj_res huh_udp_open(uint8_t v6, uint32_t timeout_ms) {
+  int fd = socket(v6 ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return io_errno();
+  struct timeval tv = {.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
+  int buf = 4 << 20;
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+  return lean_io_result_mk_ok(lean_box_uint32((uint32_t)fd));
+}
+
+LEAN_EXPORT lean_obj_res huh_udp_bind(uint32_t fd, b_lean_obj_arg addr) {
+  struct sockaddr_storage ss;
+  socklen_t len = to_sockaddr(addr, &ss);
+  if (len == 0) return io_user_error("bad address");
+  if (bind((int)fd, (struct sockaddr *)&ss, len) < 0) return io_errno();
+  return io_unit();
+}
+
+LEAN_EXPORT lean_obj_res huh_udp_connect(uint32_t fd, b_lean_obj_arg addr) {
+  struct sockaddr_storage ss;
+  socklen_t len = to_sockaddr(addr, &ss);
+  if (len == 0) return io_user_error("bad address");
+  if (connect((int)fd, (struct sockaddr *)&ss, len) < 0) return io_errno();
+  return io_unit();
+}
+
+LEAN_EXPORT lean_obj_res huh_udp_local(uint32_t fd) {
+  struct sockaddr_storage ss;
+  socklen_t len = sizeof(ss);
+  if (getsockname((int)fd, (struct sockaddr *)&ss, &len) < 0) return io_errno();
+  return lean_io_result_mk_ok(of_sockaddr(&ss));
+}
+
+#define UDP_BATCH 64
+
+/* Send every datagram to `dest`, or to the connected peer when `dest` is empty; whether the peer's
+ * port was reported unreachable. Other errors drop the datagram, as UDP may. */
+LEAN_EXPORT lean_obj_res huh_udp_send(uint32_t fd, b_lean_obj_arg ds, b_lean_obj_arg dest) {
+  struct sockaddr_storage ss;
+  socklen_t len = lean_sarray_size(dest) == 0 ? 0 : to_sockaddr(dest, &ss);
+  struct mmsghdr msgs[UDP_BATCH];
+  struct iovec iov[UDP_BATCH];
+  size_t n = lean_array_size(ds), i = 0;
+  uint8_t refused = 0;
+  while (i < n) {
+    size_t k = n - i < UDP_BATCH ? n - i : UDP_BATCH;
+    for (size_t j = 0; j < k; j++) {
+      lean_object *d = lean_array_get_core(ds, i + j);
+      iov[j].iov_base = lean_sarray_cptr(d);
+      iov[j].iov_len = lean_sarray_size(d);
+      memset(&msgs[j], 0, sizeof(msgs[j]));
+      msgs[j].msg_hdr.msg_iov = &iov[j];
+      msgs[j].msg_hdr.msg_iovlen = 1;
+      if (len) {
+        msgs[j].msg_hdr.msg_name = &ss;
+        msgs[j].msg_hdr.msg_namelen = len;
+      }
+    }
+    int r = sendmmsg((int)fd, msgs, (unsigned)k, 0);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      if (errno == ECONNREFUSED) refused = 1;
+      r = 1;
+    }
+    i += (size_t)r;
+  }
+  return lean_io_result_mk_ok(lean_box(refused));
+}
+
+static _Thread_local uint8_t *recv_bufs;
+
+/* Up to `max` of the datagrams waiting, at least one, as (datagram, sender) pairs; empty after the socket's
+ * timeout. */
+LEAN_EXPORT lean_obj_res huh_udp_recv(uint32_t fd, uint32_t max) {
+  enum { SLOT = 65536 };
+  if (recv_bufs == NULL && (recv_bufs = malloc((size_t)UDP_BATCH * SLOT)) == NULL)
+    return io_user_error("out of memory");
+  struct mmsghdr msgs[UDP_BATCH];
+  struct iovec iov[UDP_BATCH];
+  struct sockaddr_storage from[UDP_BATCH];
+  memset(msgs, 0, sizeof(msgs));
+  for (int j = 0; j < UDP_BATCH; j++) {
+    iov[j].iov_base = recv_bufs + (size_t)j * SLOT;
+    iov[j].iov_len = SLOT;
+    msgs[j].msg_hdr.msg_iov = &iov[j];
+    msgs[j].msg_hdr.msg_iovlen = 1;
+    msgs[j].msg_hdr.msg_name = &from[j];
+    msgs[j].msg_hdr.msg_namelen = sizeof(from[j]);
+  }
+  int r;
+  do r = recvmmsg((int)fd, msgs, max < UDP_BATCH ? max : UDP_BATCH, MSG_WAITFORONE, NULL);
+  while (r < 0 && errno == EINTR);
+  if (r < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return lean_io_result_mk_ok(lean_mk_empty_array());
+    return io_errno();
+  }
+  lean_object *out = lean_alloc_array(0, (size_t)r);
+  for (int j = 0; j < r; j++) {
+    size_t n = msgs[j].msg_len;
+    lean_object *d = lean_alloc_sarray(1, n, n);
+    memcpy(lean_sarray_cptr(d), iov[j].iov_base, n);
+    out = lean_array_push(out, pair(d, of_sockaddr(&from[j])));
+  }
+  return lean_io_result_mk_ok(out);
+}
+
+/* Wakes a thread blocked in `huh_udp_recv`, and makes later calls return at once. */
+LEAN_EXPORT lean_obj_res huh_udp_shutdown(uint32_t fd) {
+  shutdown((int)fd, SHUT_RDWR);
   return io_unit();
 }
