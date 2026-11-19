@@ -13,7 +13,7 @@ require uproar from git "https://github.com/katzenpost/uproar.git" @ "93e09c06ba
 -- Directly, for Argon2 (Cryptlib.Primitives.KDF.Argon2), and at lean_tls's revision for ML-DSA-65.
 require cryptlib from git "https://github.com/katzenpost/cryptlib.git" @ "c4ead95fdae9402559b4711dcb14c86ea77e7be1"
 
-require lean_quic from git "https://github.com/katzenpost/lean_quic.git" @ "194d19bf0f07a16513609b93fc1e1cd01e0349b1"
+require lean_quic from git "https://github.com/katzenpost/lean_quic.git" @ "1af2400553b253e252fdbc55e7cd03cdf98c7ddc"
 
 @[default_target]
 lean_lib Huh
